@@ -65,8 +65,8 @@ libtudor_src = [
 ]
 
 driver_dll_names = [
-    'synaFpAdapter104.dll',
-    'synaWudfBioUsb104.dll'
+    'synaFpAdapter103.dll',
+    'synaWudfBioUsb103.dll'
 ]
 
 add_global_arguments('-Wno-incompatible-pointer-types', language : 'c')
