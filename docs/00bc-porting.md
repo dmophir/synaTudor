@@ -529,6 +529,29 @@ First finger capture via `pydrv/tools/capture_pgm.py --capture 5` (over TLS):
 - Artifacts: `/root/synatudor/1d/1d_capture.log`, `run.out`. Sensor healthy;
   pairing/TLS unaffected (this is purely the frame-read command).
 
+### 2026-07-23 — frame-command RE (104 DLL): FRAME_READ ok, FRAME_ACQ is the gap
+RE of the frame commands in `synaWudfBioUsb104.dll` (radare2; identical protocol
+to 103), via the command builders (opcode set by `fcn.180087530`, sent by
+`fcn.180087000`):
+- **`FRAME_READ (0x7f)`** builder `fcn.180083b10` (`tudorCmdFrameRead`): 9-byte
+  request — `[0]=0x7f`, `[1-2]=seq` (from `sensor->+0x90`), `[3-4]=0`,
+  `[5-6]=0xffff`, `[7-8]=3`. **Matches pydrv's `capture.py` exactly** ⇒ not the
+  problem.
+- **`FRAME_ACQ (0x80)`** builder `fcn.180083e80` (`tudorCmdFrameAcq`): a
+  **multi-mode, record-based** request (~25 bytes) — writes a header
+  (`[1-4]`, `[5-8]=num_frames`) then appends parameter *records* whose content
+  depends on args (`var_50h` branch; a 1/2/3 mode selector) with observed
+  constants `0x0c (12)`, `0x14 (20)`, `2`, `1`, `8`. **pydrv sends a flat 17-byte
+  struct** and stops at offset `0x10` — it omits the trailing records
+  (`0x11..0x18`). ⇒ **This is why `FRAME_READ` returns `0x0689`:** the sensor's
+  capture mode is misconfigured by an incomplete `FRAME_ACQ`.
+- Windows uses **num_frames=1** and **capture flags 7/15** (per `rev.txt`).
+- **Blocker:** the exact `FRAME_ACQ` bytes are arg/branch-dependent and not
+  reliably reconstructable from static disasm alone. Cleanest ground truth is a
+  **Windows USB capture** (USBPcap) of one real capture — the deferred fallback,
+  now justified. Alternative: deeper static arg-tracing, or best-effort empirical
+  (costs finger presses).
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229
