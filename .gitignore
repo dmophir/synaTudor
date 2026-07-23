@@ -1,1 +1,4 @@
 **/__pycache__
+
+# Local opencode agent def (hardcodes user-specific 'toast' enterprise model)
+.opencode/agent/re.md
