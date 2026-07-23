@@ -197,6 +197,11 @@ Append dated entries here as diagnostics run. Newest at the bottom.
 - Probe scripts live on the tablet at `/root/synatudor/pydrv/probe_00bc.py`
   and `probe2_00bc.py`; the `rev` pydrv tree is at `/root/synatudor/pydrv/`.
   Dell driver extracted on the Mac under the opencode temp dir.
+- **Session end status:** only read-only ops were run (GET_VERSION, IOTA reads,
+  USB reset). **No stateful/destructive command was issued** — the sensor is NOT
+  re-paired, and the **Windows fingerprint enrollment remains intact.** Phase 1
+  (pairing → TLS → enroll) is intentionally deferred pending explicit consent,
+  since pairing takes ownership and breaks the Windows enrollment.
 
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
