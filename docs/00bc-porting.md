@@ -463,6 +463,21 @@ HS-key derivation to the 103 Augusta driver `[ASM-103]`+`[ASM-104]`:
   **eliminated**; remaining 1c unknowns are only generic protocol behavior
   (cert sizes, TLS handshake quirks) that pydrv already handles for 104.
 
+### 2026-07-23 — pre-1c pairing-crypto dry-run (PASS, Python 3.14)
+Before the destructive pair, validated that pydrv's *stateful* crypto path runs
+on the tablet (previously only the read path was exercised). Tool:
+`pydrv/diag/dryrun_pair_crypto.py` (no sensor I/O). On Python **3.14.6** /
+`cryptography` **49.0.0**:
+- `load_hs_key` OK (secp256r1); `create_host_cert` OK (ECDSA sign, sig_len 71);
+  400-byte `SensorCertificate` `tobytes`/`frombytes` round-trip OK; host-cert
+  signature **self-verifies** against the HS public key; `SensorPairingData`
+  save/load round-trip (868 B) OK. → "ALL PAIR-CRYPTO DRY-RUN CHECKS PASSED".
+- ⇒ The Python-3.14/`cryptography` risk on the pair/TLS path is retired for the
+  crypto+serialization portion. `pair` is now the correct next step.
+- Re-answer to "is `pair` still correct?": **yes** — it is unavoidable (Linux
+  must own the sensor to capture/enroll) and now maximally de-risked; only the
+  non-destructive crypto dry-run was worth doing first, and it passed.
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229
