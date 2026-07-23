@@ -414,6 +414,34 @@ binary, to predict whether `pair`/`init` will work before the destructive step.
 - **Decision:** RE-first — recover Augusta's HS key (new step 1b.6) *before* any
   pairing attempt.
 
+### 2026-07-23 — 1b.6 HS-key recovery: progress + effort reality
+Read-only RE of `synaWudfBioUsb103.dll` (radare2) to recover Augusta's HS key.
+- **Augusta HS-key seed EXTRACTED** `[ASM-103]`. `palGenHSPrivKey`
+  (`fcn.1800724d0`) builds the 32-byte key-material inline (byte movs into a
+  stack buffer, len `0x20`) then calls the KDF with the `HS_KEY_PAIR_GEN` label.
+  Augusta seed =
+  `b3494469 d36e4861 9f0b2c7b d3920374 9f0371df 1f2ea374 2b7b05bb 4daee823`.
+  Confirmed **different** from the 104 seed (`717cd72d…`).
+- **KDF identified** `[ASM-103]`: `palGenHSPrivKey` → `palSymKeyGen`
+  (`fcn.1800779f0`) → `palPRF` (`fcn.1800743b0`), and `palPRF` uses
+  **`BCryptDeriveKey` with `TLS_PRF` + `SHA256`** ⇒ the derivation is the
+  **TLS 1.2 PRF** `P_SHA256(secret, label‖seed)`. The derived 32 bytes are
+  imported directly as the ECC private scalar.
+- **Not yet reproduced:** brute-forcing standard constructions
+  (P_SHA256/HKDF/SP800-108/HMAC/SHA over km+label+ctx variants, 80 combos) did
+  **not** reproduce the known 104 pair (seed `717c…` → priv `e8a2…`). Likely
+  cause: the exact `(secret,label,seed)` argument layout to `palPRF` needs
+  tracing (args at `0x180077e97` come from several locals), **and/or** the 104
+  seed transcribed in `rev.txt` is slightly off.
+- **Recommended next step:** eliminate the transcription risk by extracting the
+  **104 seed directly** from the Lenovo 104 driver (`libtudor/download_driver.sh`
+  → `synaWudfBioUsb104.dll`, `palGenHSPrivKey`), giving a self-consistent
+  104 (seed→`e8a2…`) validation pair; then reproduce the exact PRF input layout,
+  validate on 104, and apply to the Augusta seed to get Augusta's HS key.
+- **Status:** STOP before 1c (destructive). Sensor untouched. HS key not yet
+  recovered — pairing must wait until it is (or until we accept an empirical,
+  non-destructive-if-rejected pair probe).
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229
