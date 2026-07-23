@@ -14,10 +14,17 @@ Last updated: 2026-07-23
   effort for `00bc`.** It's on the libfprint "Unsupported Devices" wiki list
   with no RE-lead flag. Ubuntu bug #2144073 is a symptom report with no progress.
 - This repo is a fork of `Popax21/synaTudor`. Branch `00bc` is a *blind* port of
-  the `relink` approach from `00be`→`00bc` (DLL family swapped 104→103, Lenovo
-  driver → Dell driver). It is **unverified and likely does not work as-is.**
-- Agreed plan: **diagnose the protocol family before committing to a driver
-  strategy.** See "Strategy".
+  the `relink` approach from `00be`→`00bc`. Superseded — see below.
+- **PHASE 0 RESULT (2026-07-23): `00bc` is a Tudor-protocol sensor.** Dell's
+  driver calls it **"Augusta"** (`synaWudfBioUsb103.dll`), and it runs firmware
+  **10.1** — the *same* major.minor the `rev` prototype already has the sensor
+  key for. The `rev` Python driver reads it end-to-end (GET_VERSION + IOTAs +
+  sensor-key load all succeed). **Chosen path: extend the `rev` reimplementation**
+  (Path B). The DLL-relink / blind-`00bc` approach is deprioritized — the `rev`
+  path doesn't depend on the 103-vs-104 DLL question at all.
+- **Next gate:** enrolling on Linux requires *pairing* (take-ownership), which
+  re-keys the sensor and **breaks the existing Windows enrollment**. Needs
+  explicit go-ahead before running (see "Strategy → Phase 1").
 
 ## Hardware / environment facts
 - USB ID: `06cb:00bc`. Internal sensor "product id" (from GET_VERSION) is a
@@ -45,11 +52,13 @@ Last updated: 2026-07-23
 - No forks/MRs/entries target `00bc` anywhere found.
 
 ## Protocol landscape (which lineage is `00bc`? — the pivotal unknown)
-Three candidates; only empirical testing on the device decides:
-1. **bmkt / MoC** (like `00bd`) → easiest: add USB ID to libfprint `synaptics`.
-2. **Tudor TLS** (like `00be`) → use/extend synaTudor `rev`; needs the sensor
-   public key for `00bc`'s firmware version (see coupling below).
-3. **"103"-family / other** → fresh RE (Windows USB capture + Ghidra).
+**RESOLVED (2026-07-23): candidate #2 — Tudor TLS.** See Phase 0 results below.
+The three candidates considered were:
+1. **bmkt / MoC** (like `00bd`) → ruled out.
+2. **Tudor TLS** (like `00be`) → **CONFIRMED.** `00bc` ("Augusta", fw 10.1)
+   speaks the Tudor protocol; the `rev` prototype already has its sensor key.
+3. **"103"-family / other** → ruled out (103 is just the Augusta DLL gen; the
+   on-wire protocol is Tudor).
 
 The Tudor protocol (from `rev/proto.txt`): little-endian; USB endpoints
 cmd(EP0)/resp(EP1)/interrupt; command set incl. `GET_VERSION(0x1)`,
@@ -72,15 +81,14 @@ sensor cert verified against a hardcoded per-firmware ECC public key.
     (`mfw.tupd`, `iota.tupd`).
   - `libfprint/.../drivers/tudor.c` — partial C driver.
 
-## Why the current `00bc` branch likely won't work as-is
-- libtudor's Windows-API/WDF shims and all `rev` RE target the **"104"** DLLs;
-  the branch loads **"103"** Dell DLLs → likely unshimmed API calls / different
-  structs / possibly different wire protocol.
-- Even if it links, the `rev` prototype is coupled to firmware version via the
-  hardcoded sensor public key (only `10.1` bundled) and version-specific
-  firmware blobs. `00bc`'s firmware/keys are unknown.
-- Whether the Dell "103" driver even binds `00bc` (and via which stack) is
-  unverified — must read its `.inf`.
+## Why the blind `00bc` (relink) branch is deprioritized
+- The relink approach shims Windows APIs for the "104" DLLs; the blind branch
+  loads "103" (Augusta) DLLs, so shim compatibility was never guaranteed.
+- Moot now: Phase 0 shows the **`rev` reimplementation talks to `00bc` directly**
+  and doesn't load any Windows DLL, sidestepping the 103-vs-104 question entirely.
+- The one real coupling in `rev` (per-firmware sensor public key) is **already
+  satisfied**: `00bc` runs fw 10.1 and `sensor_keys/10.1-kf.tsk` matched.
+- Keep the relink branches around only as a protocol reference / fallback.
 
 ## Decisions made (scope & resources)
 - **Effort level: whatever it takes, including full reverse engineering.**
@@ -111,26 +119,35 @@ sensor cert verified against a hardcoded per-firmware ECC public key.
   (`sudo python -m tudor.driver usb --pid 0x00bc` → `info`). Valid GET_VERSION
   ⇒ Tudor-family + reveals firmware version; error/timeout ⇒ not Tudor.
 
-### Phase 1 — Commit to a path
-- **A. bmkt/MoC:** add `06cb:00bc` to libfprint in-tree `synaptics`, build git,
-  test enroll/verify; confirm framing via short capture. Upstreamable.
-- **B. Tudor TLS:** extend `rev` pydrv (preferred over relink); extract sensor
-  public key for `00bc`'s firmware; wire pairing→TLS→enroll. Fix the relink
-  branch only if 0b shows 104 DLLs bind `00bc`; else retarget DLL family and
-  extend shims.
-- **C. Other/103/ambiguous:** Windows VM + USBPcap capture of enroll/verify;
-  Ghidra the Dell 103 DLLs; prototype in pyusb; port to a C libfprint driver.
+### Phase 1 — Bring up the `rev` driver on `00bc` (CHOSEN: Path B)
+Path A (bmkt/MoC) and Path C (fresh RE) are ruled out by Phase 0. Plan:
+1. **Read-only protocol shakedown (no state change):** exercise more unencrypted
+   commands via the `rev` driver (GET_START_INFO, storage-info, event-config
+   reads) to check for Augusta divergences before any write.
+2. **Pairing gate (DESTRUCTIVE to Windows enrollment — needs explicit OK):**
+   run `pair` → `save_pdata` to take ownership and persist pairing data, then
+   `init` to establish the TLS 1.2 session. This re-keys the sensor; the Windows
+   fingerprint enrollment will stop working until re-paired under Windows.
+3. **Capture/enroll:** exercise frame acquisition + enroll + verify via `rev`,
+   watching for Augusta-specific differences (frame dims, IPL, event flow).
+4. Fix any Augusta divergences in the `rev` code as they surface; add `00bc`
+   (and likely `00a9`) to the driver's ID list.
 
 ### Phase 2 — Productionize
-- Package as in-tree libfprint driver (MoC) or TOD/out-of-tree module (Tudor);
-  udev + fprintd; validate enroll/verify/identify in GNOME; update libfprint
+- Move from the Python prototype to the `rev` libfprint C driver
+  (`libfprint/.../drivers/tudor.c`); package as a TOD/out-of-tree module;
+  udev + fprintd; validate enroll/verify/identify in GNOME; update the libfprint
   wiki + Ubuntu bug #2144073.
 
 ## Open questions / unknowns
-- Protocol family of `00bc` (Phase 0 resolves).
-- `00bc` firmware version and whether we have/can extract its sensor public key.
-- Whether Dell's 103 driver is relinkable with libtudor's 104-oriented shims.
-- USB interface class (vendor WBDI vs HID) and endpoint layout.
+- ~~Protocol family of `00bc`~~ — RESOLVED: Tudor ("Augusta", fw 10.1).
+- ~~Firmware version / sensor key availability~~ — RESOLVED: fw 10.1, key
+  `10.1-kf.tsk` present and loads.
+- Do the **stateful** Tudor operations (pair, TLS, capture, enroll, DB2) behave
+  identically on Augusta `00bc`, or are there divergences vs Tudor `00be`?
+- Can Windows fingerprint be restored (re-paired) after we take ownership on
+  Linux? (Assumed yes via the Windows driver, but unverified.)
+- Does sibling `06cb:00a9` share fw/keys (bonus coverage)?
 
 ## Phase 0 running log (diagnostics)
 Append dated entries here as diagnostics run. Newest at the bottom.
@@ -152,8 +169,34 @@ Append dated entries here as diagnostics run. Newest at the bottom.
   installed for driver extraction. Only `unzip` was present before.
 - **Dell driver URL** live: HTTP 200, 13,566,112 bytes, `application/octet-stream`.
   Expected SHA1 (`libtudor/installer.sha`) = `b9941d62845f4ad324fda3ae5f542bc32f4a7ae2`.
-- **Still TODO in Phase 0:** extract + read Dell `.inf` (0b); run pydrv `info`
-  probe (0c) to get firmware version / product id / provision state.
+### 2026-07-23 — Phase 0 results (family CONFIRMED: Tudor / "Augusta")
+- **Dell driver `.inf`** (`synaWudfBioUsbUwp.inf`, DriverVer 6.0.18.1103,
+  09/03/2024; folder `DellAugusta-103_v6_0_18_1103_Signed_uwp_x64_Inf`):
+  - Binds exactly **`USB\VID_06CB&PID_00A9`** and **`USB\VID_06CB&PID_00BC`**.
+    So `00bc`'s sibling under the same driver is `00a9`.
+  - Sensor codename **"Augusta"**; DLL generation **103**
+    (`synaWudfBioUsb103.dll` UMDF driver over WinUSB; `synaFpAdapter103.dll`
+    WinBio Sensor/Engine/Storage adapter). **Same WBDI/UMDF architecture as
+    Tudor (104)** — Augusta is a sibling generation, not a different stack.
+  - ⇒ The blind `00bc` branch's DLL *names* (103) were right for this driver;
+    the open question was only shim/protocol compat — now moot, see below.
+- **`GET_VERSION` probe** (raw, read-only, via `rev` `tudor.comm`):
+  `status=0x0000`, **fw=10.1.2884577**, product_id=`0x41 'A'` (PROD_ID5),
+  sensor_id=`22eb371d6299`, provision_state=**3 (provisioned to Windows)**,
+  flags ⇒ advanced_security present, **key_flag set**.
+- **Full `Sensor(comm)` construction** (read-only; GET_VERSION + IOTA reads +
+  key load, no pairing/TLS): **succeeds**. `cfg_ver=3472.0.2`, `wbf_param=0x8`,
+  `pub_key_loaded=True` (bundled `sensor_keys/10.1-kf.tsk` matched).
+- **Conclusion:** `06cb:00bc` speaks the Tudor protocol; every read-only,
+  pre-TLS layer works with the `rev` prototype unchanged, and the required
+  sensor public key is already bundled. **Path B confirmed.** Pivotal unknown
+  (§"Protocol landscape") is **RESOLVED: Tudor family.**
+- **Not yet tested (stateful, deferred to Phase 1):** pairing/take-ownership,
+  TLS session establishment, frame capture/enroll, DB2 storage. Pairing is
+  **destructive to the Windows enrollment** and needs explicit consent.
+- Probe scripts live on the tablet at `/root/synatudor/pydrv/probe_00bc.py`
+  and `probe2_00bc.py`; the `rev` pydrv tree is at `/root/synatudor/pydrv/`.
+  Dell driver extracted on the Mac under the opencode temp dir.
 
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
