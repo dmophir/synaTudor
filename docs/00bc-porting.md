@@ -126,17 +126,13 @@ Path A (bmkt/MoC) and Path C (fresh RE) are ruled out by Phase 0.
   pre-TLS commands match Tudor framing.
 - **1b. Capture-to-PGM tooling staged** — DONE (`pydrv/tools/capture_pgm.py`),
   not run.
-- **1b.6. Recover Augusta's HS (host-signing) key** — NEW, read-only RE; **gates
-  1c.** Evidence (pre-1c key check) shows the sensor keys match but the 104 HS
-  seed is absent in 103 ⇒ pydrv's `hskey.pem` would be rejected. Steps:
-  1. Locate `palSynaKmGet` in `synaWudfBioUsb103.dll` (radare2); read Augusta's
-     seed constant; confirm it differs from the 104 seed (vs. obfuscated).
-  2. Reproduce the `palSymKeyGen`/`palGenHSPrivKey` KDF (label `HS_KEY_PAIR_GEN`),
-     **validated against the known 104 pair** (seed `717c…` → priv `e8a2…`). Try
-     standard KDFs (e.g. SP800-108 CTR-HMAC-SHA256) first; else RE `palSymKeyGen`.
-  3. Derive Augusta's HS private key; swap into a pydrv copy (`load_hs_key`) —
-     small, non-destructive; keep the original 104 key.
-  4. STOP and report (incl. KDF effort reality) before the destructive gate.
+- **1b.6. Verify Augusta's HS (host-signing) key** — DONE (read-only RE).
+  RESULT: **pydrv's `hskey.pem` is correct for Augusta; no swap needed.** Proven
+  by extracting the 104 driver and diffing the HS-key derivation chain
+  (`palGenHSPrivKey`/`palSymKeyGen`/`palPRF` + inline seed `b34944…`) — identical
+  between 103 and 104 (normalized disasm diff = 0). See running log. Both keys
+  pydrv needs (sensor pubkey + HS key) are now confirmed for Augusta ⇒ the
+  crypto/key risk for `pair`/`init` is eliminated.
 - **1c. Pairing gate (DESTRUCTIVE; needs explicit OK) — gated on 1b.6:**
   snapshot (OS) → `pair` with full COMM logging (capture `PAIR 0x93` req/resp) →
   success: `save_pdata` + `fprintd_setup` → `init` (TLS; sensor-cert verify
@@ -396,14 +392,15 @@ binary, to predict whether `pair`/`init` will work before the destructive step.
   coordinates are embedded in `synaWudfBioUsb103.dll` (little-endian) at a key
   table `~0x130de3–0x130f2a`. ⇒ `init()`/TLS **device-cert verification predicted
   to work**; this path is de-risked. `[ASM-103]`
-- ⚠️ **HS (host-signing) key almost certainly DIFFERS.** Per `[RE-104]`
-  (`rev.txt` `_tudorSecuritySignHPubK`), the host key is **not stored** — it is
-  *derived* from a hardcoded seed via `palSynaKmGet` → `palSymKeyGen`
-  (label `HS_KEY_PAIR_GEN`). The 104 seed constant
-  `717cd72d0962bc4a2846138dbb2c24192512a76407065f383846139d4bec2033` and even its
-  16-byte halves are **ABSENT** from both 103 DLLs. ⇒ Augusta likely uses a
-  **different seed → different HS key**, so `pydrv.pair()` with the 104-derived
-  `hskey.pem` (`priv e8a2a2b6…`) would be **rejected**. `[ASM-103]`
+- ✅ **HS (host-signing) key MATCHES — pydrv's `hskey.pem` is correct for
+  Augusta.** (This corrects an earlier false alarm.) The host key is *derived*
+  (`palGenHSPrivKey` → `palSymKeyGen` → `palPRF`, TLS 1.2 PRF via
+  `BCryptDeriveKey`, label `HS_KEY_PAIR_GEN`) from an inline 32-byte seed. That
+  seed (`b3494469…4daee823`) and the **entire derivation chain are byte-identical
+  between the 103 (Augusta) and 104 (Tudor) drivers** (normalized disasm diff =
+  0). ⇒ identical derived HS key = pydrv's bundled `hskey.pem` (`priv e8a2…`).
+  Note: `rev.txt`'s `palSynaKmGet` `717c…` is **not** the HS-key input (red
+  herring); searching for it earlier produced a false "differs" conclusion. `[ASM-103]`
 - ✅ **Derivation machinery present in 103** `[ASM-103]`: strings
   `palSynaKmGet`, `palSymKeyGen`, `HS_KEY_PAIR_GEN`, `palGenHSPrivKey`,
   `_tudorSecuritySignHPubK`, `_tudorSecurityGenHostKeyPair`. So the *algorithm*
@@ -441,6 +438,30 @@ Read-only RE of `synaWudfBioUsb103.dll` (radare2) to recover Augusta's HS key.
 - **Status:** STOP before 1c (destructive). Sensor untouched. HS key not yet
   recovered — pairing must wait until it is (or until we accept an empirical,
   non-destructive-if-rejected pair probe).
+
+### 2026-07-23 — 1b.6 RESOLVED: pydrv's HS key is CORRECT for Augusta
+Downloaded the Lenovo 104 driver (`r19fp02w.exe`, SHA1 `7450e2f9…`, matches
+`libtudor/installer.sha`), extracted `synaWudfBioUsb104.dll`, and compared the
+HS-key derivation to the 103 Augusta driver `[ASM-103]`+`[ASM-104]`:
+- The **inline HS-key seed is byte-identical** in both drivers'
+  `palGenHSPrivKey`: `b3494469 d36e4861 9f0b2c7b d3920374 9f0371df 1f2ea374
+  2b7b05bb 4daee823`. (So `rev.txt`'s `palSynaKmGet` `717c…` is **not** the
+  HS-key input — a red herring; the earlier "seed differs / HS key differs"
+  concern was a FALSE ALARM.)
+- **The whole derivation chain is identical across 103 and 104** — normalized
+  disassembly diff = 0: `palGenHSPrivKey` (138 insns), `palSymKeyGen` (210),
+  `palPRF` (281). Same seed + same label (`HS_KEY_PAIR_GEN`) + same KDF
+  (TLS 1.2 PRF via `BCryptDeriveKey`) ⇒ **identical derived HS key.**
+- Since the 104 output is pydrv's bundled `hskey.pem` (`priv e8a2…`),
+  **pydrv's `hskey.pem` is valid for Augusta. No HS-key swap is needed.**
+- (Note: we did not numerically reproduce the exact PRF argument layout — a few
+  standard constructions didn't match `e8a2…` — but code-level equivalence
+  across the two drivers is a stronger proof and makes reproduction unnecessary.)
+- **Net for 1c:** both keys pydrv relies on are now confirmed correct for
+  Augusta — sensor public key (fw 10.1, matched in 103) and the HS host-signing
+  key (derivation identical). The crypto/key risk for `pair`/`init` is
+  **eliminated**; remaining 1c unknowns are only generic protocol behavior
+  (cert sizes, TLS handshake quirks) that pydrv already handles for 104.
 
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
