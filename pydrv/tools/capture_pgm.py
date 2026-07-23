@@ -34,7 +34,7 @@ def setup_logging(logpath):
                       (tudor.LOG_TLS, "TLS"), (tudor.LOG_DETAIL, "DETAIL"),
                       (tudor.LOG_INFO, "INFO"), (tudor.LOG_WARN, "WARN")]:
         logging.addLevelName(lvl, name)
-    logging.basicConfig(level=tudor.LOG_PROTO,
+    logging.basicConfig(level=tudor.LOG_COMM,
                         format="%(levelname)7s  %(message)s",
                         handlers=[logging.FileHandler(logpath, mode="w"),
                                   logging.StreamHandler(sys.stderr)])

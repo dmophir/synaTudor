@@ -93,8 +93,9 @@ class SensorFrameCapturer:
                 logging.log(tudor.LOG_PROTO, "Waiting for new frame...")
                 logging.log(tudor.LOG_PROTO, "    current sequence number: %d" % seq_num)
                 while True:
-                    new_seq_num = self.sensor.comm.get_event_data()[5] & 0x7
-                    logging.log(tudor.LOG_PROTO, "    new sequence number: %d" % seq_num)
+                    ev = self.sensor.comm.get_event_data()
+                    new_seq_num = ev[5] & 0x7
+                    logging.log(tudor.LOG_PROTO, "    event data: %s new seq: %d" % (ev.hex(), new_seq_num))
                     if new_seq_num != seq_num: break
 
                 #Read frame

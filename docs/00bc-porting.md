@@ -552,6 +552,48 @@ to 103), via the command builders (opcode set by `fcn.180087530`, sent by
   now justified. Alternative: deeper static arg-tracing, or best-effort empirical
   (costs finger presses).
 
+### 2026-07-23 — 1d frame-capture RE (subagent fanout) + still blocked at 0x0689
+Used the `re` (Opus) subagent fanout to RE the frame-capture commands. **Fanout
+works well in opencode.** Findings (all cross-checked 103≡104):
+- **`FRAME_ACQ (0x80)` is multi-mode.** pydrv's original flat 17-byte request was
+  already a valid "mode 2" shape; a 25-byte "mode 3" also exists. Patched
+  `capture.py` to send the exact **25-byte mode-3** request
+  (`80 01000000 <num> 0100 00 08 01 01 00 00 0100 00 0c 1400 02 00`). On device it
+  is **ACCEPTED (status 0x0000)** — but does not fix the read.
+- **`FRAME_READ (0x7f)` bytes + seq are provably correct**: 9-byte req
+  `7f <seq> 0000 ffff 0300`; seq from `sensor+0x90` (reset to 0 by ACQ, ++ only on
+  success) ⇒ first read = **seq 0**, exactly what pydrv sends. Not malformed.
+- **ioctl `0x6a` = a cached interrupt-EP read** (== pydrv `get_event_data()` on
+  EP 0x83). **No extra bus command exists between `FRAME_ACQ` and `FRAME_READ`**
+  on 103. (104-only extra = host-side WinUSB `SET_POWER_POLICY` pipe-timeout, not
+  a wire transfer.) Readiness gate = interrupt `[0]==2` AND frame-index changed.
+- **Status `0x0689`** = unmapped raw sensor "0x6xx-band" error (→ driver maps to
+  0xca); i.e. the sensor rejecting the read as a **capture-state/timing**
+  condition, not a byte error.
+- **On-device result:** with mode-3 ACQ accepted AND a frame latched
+  (interrupt `02000000000101`, byte0=2, idx=1), `FRAME_READ(seq=0)` STILL returns
+  **0x0689**. So static RE has **plateaued**: ACQ mode, READ bytes, seq, and
+  readiness all match the Windows driver, yet the sensor rejects the read.
+- **Next step (pending, needs a finger press):** on-device experiment
+  `pydrv/diag/frame_read_probe.py` — after one press, sweeps `FRAME_READ` seq 0..7
+  (raw) and logs the interrupt sequence, to see if *any* seq is accepted or if the
+  block is deeper (mode/timing/state). If that's inconclusive, escalate to a
+  Windows dynamic capture (Frida on the friend's identical tablet — the frame
+  cmds are TLS-encrypted, so passive USBPcap won't suffice) for ground-truth
+  timing/sequence.
+
+**Operational notes for next session:**
+- Sensor is currently HEALTHY (GET_VERSION 0x0000, prov 3); pairing intact;
+  Windows enrollment broken (from 1c, recoverable via Windows re-enroll).
+- Failure recovery: a *killed capture* can leave a **half-open TLS session** →
+  plaintext commands then return a TLS alert record (`15 03 03 …`); clear it with
+  a USB `dev.reset()` + ~20s idle wait. A *failed `FRAME_ACQ`* can leave the
+  sensor stuck (GET_VERSION → `0x0315`); also self-recovers after idle timeout.
+- `pydrv/diag/`: `probe_getversion.py` (pyusb-only health check), `probe_sensor.py`,
+  `shakedown_00bc.py`, `dryrun_pair_crypto.py`, `frame_read_probe.py`.
+  `pydrv/tools/`: `pair_00bc.py` (pair/init-test), `capture_pgm.py` (capture).
+  Pairing data at `/etc/tudor/22eb371d62990000.pdata`.
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229
