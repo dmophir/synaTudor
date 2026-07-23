@@ -150,42 +150,68 @@ Path A (bmkt/MoC) and Path C (fresh RE) are ruled out by Phase 0. Plan:
 - Does sibling `06cb:00a9` share fw/keys (bonus coverage)?
 
 ## Pairing, ownership & reversibility
-How pairing works and whether taking ownership on Linux is permanent. Sourced
-from the Windows-driver RE (`rev/rev.txt`) + the `pydrv` `pair()` implementation.
+How pairing works and whether taking ownership on Linux is permanent.
+
+**Provenance / confidence legend** (be precise about where each claim comes from):
+- `[RE-104]` — from Popax21's RE of the **104/Tudor** Windows driver
+  (`rev/rev.txt`); *inferred* for our 103/Augusta sensor, not dynamically tested.
+- `[STR-103]` — independently corroborated by a **read-only string scan of the
+  actual `synaWudfBioUsb103.dll` (Augusta)** on 2026-07-23 (see the Phase 1 log).
+- `[PROBE-00bc]` — directly observed on our sensor via read-only probes.
+- `[UNVALIDATED]` — not confirmed by us on 103, dynamically, or at all.
+
+Nothing here has been validated by *actually pairing* — the destructive step is
+still un-run.
 
 - **Pairing is a re-doable, host-side credential binding.** `sensor.pair()`
   issues only `PAIR (0x93)`; it requires provision state 3 and generates a fresh
-  ECC host keypair each time. USAGE: *"you can pair the sensor as many times as
-  you want."* Taking ownership does **not** require the previous owner's key, so
-  either OS can re-claim the sensor.
-- **Pairing ≠ provisioning.** Provision state (`3 = provisioned`) is a deeper
-  state that `pair()` requires but never changes — the sensor stays provisioned.
+  ECC host keypair each time. `[RE-104]` + code. USAGE: *"you can pair the sensor
+  as many times as you want"* — `[RE-104]`/author experience on `00be`,
+  `[UNVALIDATED]` on `00bc`.
+- **Pairing ≠ provisioning.** Provision state `3 = provisioned` `[PROBE-00bc]`;
+  `pair()` requires it but never changes it `[RE-104]`+code.
+- **Host-side pairing storage confirmed on 103** `[STR-103]`: the driver contains
+  `CBiometricDevice::DoPairing/DoUnpairing/OnResetOwnership/ProcessPairing`, the
+  registry path `Synaptics\PairingData`, `PairingInProcess`/`UnairingInProcess`
+  flags, and pairing data is **DPAPI-encrypted** (`CryptProtectData`/
+  `CryptUnprotectData`). There is also an on-device **"host partition"** that
+  stores (encrypted) pairing info (`_isHostPartitionHasPairingInfo`,
+  "update ... pairing data in host partition"). Basic vs advanced pairing paths
+  exist (`_tudorSecurityBasicPairing`/`_tudorSecurityAdvancedPairing`); our
+  sensor is advanced-security `[PROBE-00bc]`.
 - **What breaks when we pair on Linux:** the host binding is overwritten, so
-  Windows' stored pairing (registry `HKCU\Software\Synaptics\PairingData\
-  {DEVICE ID}`) goes stale and the Windows-enrolled templates (bound to that
-  pairing) are lost. **This is NOT permanent and NOT a brick:** Windows re-pairs
-  automatically on the next Windows Hello setup (or after a reinstall + Dell
-  driver); you then just re-enroll fingerprints.
+  Windows' stored pairing goes stale and the Windows-enrolled templates (bound to
+  that pairing) are lost. **Expected NOT permanent / NOT a brick:** Windows
+  re-pairs on next Windows Hello setup (or reinstall + Dell driver); you re-enroll
+  fingerprints. `[RE-104]` — plausible but `[UNVALIDATED]` end-to-end on `00bc`.
 - **Restore path is "Windows re-pairs," not "Linux unpairs":** pydrv `unpair()`
-  is essentially a no-op reset ("that's all the Windows driver does").
-- **Failure count is a HOST-side Windows throttle, NOT a device fuse.** The
-  driver keeps a "Device Data"/statistics blob (incl. `SetOwnershipFailureCount`
-  and an init failure count) that is **read from the Windows registry**, **reset
-  if older than ~30000 ticks**, **decremented** over time, and **written back**.
-  It increments only on a **failed** `vfmSecurityDoPair`/init (IOCTL 9). Hence:
-  - **Resettable:** delete/edit the Synaptics stats registry key; it also
-    auto-ages and self-decrements; a Windows reinstall wipes it.
-  - **Does not apply on Linux:** pydrv/our driver never maintains it, so Linux
-    pairing neither reads nor increments it.
-  - **No device-side pairing-failure counter is documented.** Residual caveat:
-    the sensor has NVM and `GET_START_INFO` returns a `reset nvinfo` array, so an
-    undocumented device NV counter can't be 100% ruled out — but nothing in the
-    RE indicates a device-side pairing fuse.
+  is essentially a no-op reset `[RE-104]`+code.
+- **⚠ OTP-backed ownership is the genuinely permanent/finite operation** `[STR-103]`:
+  the 103 driver references `VCSFW_CMD_PROVISION`, `VCSFW_CMD_TAKE_OWNERSHIP_EX2`,
+  `VCSFW_CMD_RESET_OWNERSHIP`, and the result `VCS_RESULT_SENSOR_OUT_OF_OTP_OWNERSHIP`
+  ("OTP" = one-time-programmable ⇒ a finite, permanent resource). These
+  ownership/provision ops are **distinct** from `PAIR (0x93)`; `pydrv.pair()`
+  never issues them. This is why the "never run" list below matters.
+- **Failure count is (believed) a HOST-side Windows throttle, not a device fuse.**
+  Presence corroborated on 103 `[STR-103]`: `Device Data` stats blob with
+  `SetOwnershipFailureCount`, `OwnershipFailureCount`, `DeviceInitializeFailures`,
+  `ProvisionFailureCount`, `UpdateFirmwareFailureCount`, `SensorLockFailureCount`,
+  stored under the `Synaptics\PairingData`/stats registry area. The specific
+  behavior — *read from registry, reset if older than ~30000 ticks, decremented,
+  written back; increments only on failed pair/init* — is `[RE-104]` and pending
+  disassembly confirmation on 103 (see Phase 1 log). Consequences (if 104 logic
+  holds): resettable (edit/delete registry key, auto-ages, wiped on reinstall);
+  **not maintained on Linux** (pydrv never reads/increments it).
+- **Device-side pairing-failure fuse:** none documented; the sensor does have NVM
+  and a `SensorLockFailureCount` / `VCS_RESULT_SENSOR_OUT_OF_OTP_OWNERSHIP` exist,
+  so a device-side lock around *ownership/OTP* is plausible — but that is the
+  ownership path we avoid, not plain pairing. `[STR-103]` names, `[UNVALIDATED]`
+  behavior.
 - **Operational rule:** if `pair`/`init` errors, **STOP and diagnose** rather
   than retrying, to avoid any lockout path (Windows-side or unknown device-side).
-- **Commands we will NEVER run** (deeper, potentially permanent): `PROVISION
-  (0xe)`, `TAKE_OWNERSHIP_EX2 (0x4f)`, `RESET_OWNERSHIP (0x10)`, firmware
-  `update`. `sensor.pair()` only issues `PAIR (0x93)`.
+- **Commands we will NEVER run** (deeper, potentially permanent / OTP-consuming):
+  `PROVISION (0xe)`, `TAKE_OWNERSHIP_EX2 (0x4f)`, `RESET_OWNERSHIP (0x10)`,
+  firmware `update`. `sensor.pair()` only issues `PAIR (0x93)`.
 
 ## Phase 0 running log (diagnostics)
 Append dated entries here as diagnostics run. Newest at the bottom.
