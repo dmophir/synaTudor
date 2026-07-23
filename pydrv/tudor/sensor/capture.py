@@ -64,10 +64,27 @@ class SensorFrameCapturer:
     def capture_frames(self, num_frames : int) -> list:
         frames = []
 
-        #Start capture
-        #TODO Current flags values are pure guesswork
+        #Start capture.
+        #FRAME_ACQ (0x80) request reverse-engineered from synaWudfBioUsb10{3,4}.dll
+        #(tudorCmdFrameAcq); the Windows enroll/verify path uses "mode 3" = 25 bytes,
+        #all fields little-endian. Layout (offsets):
+        #  [0]=0x80 opcode; [1-4]=flags(=1); [5-8]=num_frames; [9-10]=1; [0xb]=0;
+        #  [0xc]=8; [0xd]=1; [0xe]=1; [0xf..0x10]=0; [0x11-0x12]=1; [0x13]=0;
+        #  [0x14]=0x0c; [0x15-0x16]=0x14; [0x17]=2; [0x18]=0.
+        #(pydrv previously sent a truncated 17-byte request, which left the sensor
+        # un-armed and made FRAME_READ fail with status 0x0689.)
         logging.log(tudor.LOG_PROTO, "Starting frame capture...")
-        self.sensor.comm.send_command(struct.pack("<BIIHxBBBBB", tudor.Command.FRAME_ACQ, 0, num_frames, 1, 8, 1, 1, 1, 0), 2)
+        frame_acq = (
+            struct.pack("<B", tudor.Command.FRAME_ACQ)
+            + struct.pack("<I", 1)
+            + struct.pack("<I", num_frames)
+            + bytes([0x01, 0x00, 0x00, 0x08,
+                     0x01, 0x01, 0x00, 0x00,
+                     0x01, 0x00, 0x00, 0x0c,
+                     0x14, 0x00, 0x02, 0x00])
+        )
+        assert len(frame_acq) == 25
+        self.sensor.comm.send_command(frame_acq, 2)
         
         seq_num = 0
         try: 
@@ -98,8 +115,14 @@ class SensorFrameCapturer:
 
                 #If "last frame" flag is set, exit
                 if (frame_flags & 1) != 0: return frames
-        finally: 
-            self.sensor.comm.send_command(struct.pack("<B", tudor.Command.FRAME_FINISH), 2)
+        finally:
+            #The Windows driver does NOT send FRAME_FINISH (0x81) in the capture
+            #loop (RE of synaWudfBioUsb10{3,4}.dll found no 0x81 command). Keep it
+            #best-effort so a stray error here can't mask a successful capture.
+            try:
+                self.sensor.comm.send_command(struct.pack("<B", tudor.Command.FRAME_FINISH), 2)
+            except Exception as e:
+                logging.log(tudor.LOG_WARN, "FRAME_FINISH failed (ignored): %r" % e)
 
     def capture_images(self, num_images : int) -> list:
         return [self.frame_to_image(f) for f in self.capture_frames(num_images)]
