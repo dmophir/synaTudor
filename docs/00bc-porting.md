@@ -203,6 +203,38 @@ Append dated entries here as diagnostics run. Newest at the bottom.
   (pairing → TLS → enroll) is intentionally deferred pending explicit consent,
   since pairing takes ownership and breaks the Windows enrollment.
 
+### 2026-07-23 — Phase 0 addenda (reference details)
+- **Dell package contents** (extracted from the pinned EXE; SHA1 in
+  `libtudor/installer.sha`): `synaWudfBioUsb103.dll` (1.4 MB, UMDF USB driver —
+  holds the protocol/TLS/IPL logic **and** embedded per-fw sensor keys),
+  `synaFpAdapter103.dll` (191 KB, WinBio adapter), `synaWudfBioUsbUwp.inf`,
+  `synaumdf.cat`, plus Dell wrappers (`DellInstaller_x64.exe`, `mup.xml`,
+  `package.xml`). **No separate firmware/cert/key blobs** — they live inside
+  the DLLs. Binaries are re-obtainable via the pinned URL+SHA, so they are not
+  committed.
+- **RE reference for Augusta divergences:** `synaWudfBioUsb103.dll` is the
+  disassembly target (analog of the `rev/` Ghidra exports of the `104` DLL).
+  This is also where other-firmware sensor keys would be extracted from, if ever
+  needed (fw 10.1 is already covered by `sensor_keys/10.1-kf.tsk`).
+- **Known-good `GET_VERSION` sample** (06cb:00bc, fw 10.1) for decoding the
+  `????` fields in `rev/proto.txt`:
+  `0000d083255ce1032c000a01014101c1000022eb371d62990fa1000000000100000000000003`
+  (status `0000`; build `2c003 -> 2884577`; major `0a`; minor `01`;
+  product `41 'A'`; id `22eb371d6299`; flags1 `0f`, flags2 `a1`; prov `03`).
+- **Reproduce anytime** with the read-only probes:
+  `sudo python pydrv/diag/probe_getversion.py 0x00bc` (pyusb-only) or
+  `sudo python pydrv/diag/probe_sensor.py 0x00bc` (rev `Sensor`).
+- **Env/tooling:** tablet Python **3.14.6** ran the read path clean (pyusb
+  1.3.1, cryptography present); the TLS/stateful paths (which lean on
+  `cryptography`) are **untested**. Mac has `7zz`, `binwalk`, `cabextract`.
+- **Operational gotcha:** `python -m tudor.driver` fails to import unless
+  `matplotlib` is installed (pulled via `drvcmd/capture.py`); core sensor ops
+  don't need it — the `diag/` probes avoid the CLI entirely.
+- **Repo/branch note:** `rev` and the relink line (`relink`/`00bc`/`00bc-re`)
+  are **unrelated git histories** (no merge-base). Path B development lives on
+  the `rev` line: branch **`00bc-dev`** (off `origin/rev`), with the Phase 0 doc
+  commits cherry-picked over. `00bc-re` is kept as a bookmark.
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229

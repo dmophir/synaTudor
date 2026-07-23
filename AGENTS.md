@@ -10,10 +10,13 @@ up to date — append Phase 0 diagnostic results and any decisions there as work
 proceeds.
 
 ## Quick facts
-- Working branch: `00bc-re` (research/enablement work + this doc). `00bc` is the
-  *blind*, unverified port from `00be`; `relink` is the DLL-relinking base; `rev`
-  is the reverse-engineering effort (protocol docs + Python prototype driver);
-  `upstream` = `Popax21/synaTudor`.
+- Working branch: **`00bc-dev`** (off `origin/rev`) — Path B development on the
+  reverse-engineered Python driver (`pydrv/`), plus this doc + `docs/` +
+  read-only probes in `pydrv/diag/`. Phase 0 confirmed `00bc` is a Tudor-protocol
+  "Augusta" sensor at fw 10.1 (see the doc). Note: `rev` and the relink line
+  (`relink`/`00bc`/`00bc-re`) are **unrelated git histories**. `00bc` is the
+  *blind* relink port; `00bc-re` holds the Phase 0 docs on the relink line
+  (bookmark); `upstream` = `Popax21/synaTudor`.
 - The tablet is reachable over SSH as host `tablet`, now configured to log in as
   **root** (key-only). Agents may run diagnostics and installs there.
 - Scope decision: pursue this **as far as needed, including full reverse
