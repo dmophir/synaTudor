@@ -235,6 +235,33 @@ Append dated entries here as diagnostics run. Newest at the bottom.
   the `rev` line: branch **`00bc-dev`** (off `origin/rev`), with the Phase 0 doc
   commits cherry-picked over. `00bc-re` is kept as a bookmark.
 
+## Phase 1 running log
+Newest at the bottom. Phase 1 = bring up the rev pipeline on Augusta through to
+a captured fingerprint image over TLS. The rev libfprint driver (`tudor.c`) is
+an **FpImageDevice** that embeds Python and calls `frame_capturer.capture_images`
+— i.e. capture raw images, **match on host** (NBIS); no on-chip enroll/DB2. So
+the pivotal Phase 1 test is "can we capture a usable image over TLS?".
+
+### 2026-07-23 — 1a read-only shakedown (PASS, no divergence)
+Tool: `pydrv/diag/shakedown_00bc.py` (read-only). Results on `06cb:00bc`:
+- `GET_START_INFO (0x19)`: `status=0x0000`; start_type=0x00, reset_type=0x03,
+  start_status=0x201.
+- `STORAGE_INFO_GET (0x3e)`: `status=0x0000` **pre-TLS** (works unencrypted);
+  raw shows ~3 storage partitions.
+- `remote_tls_status` (ctrl `0x14`): `False` (not in a session — clean).
+- **IPL IOTA (`0x1a`): 68 bytes**, `abc20200bec002005b1b00000a0000004400560068...`
+  — this is the data fed to `libnative` for image reconstruction in 1d.
+- ⇒ Every pre-TLS command matches Tudor framing; no Augusta divergence yet.
+
+### 2026-07-23 — 1b tooling staged (no sensor writes)
+- Added `pydrv/tools/capture_pgm.py` (+ `tools/README.md`): headless
+  pair + capture-to-PGM (no matplotlib/X). Destructive `--pair` gated behind
+  `--pair --yes`. **Not run yet.** `py_compile` clean; not staged on the tablet
+  until the 1c go-ahead.
+- **STOP POINT:** paused before 1c (pairing/take-ownership), which is
+  destructive to the Windows enrollment. Awaiting explicit go/no-go. Sensor is
+  still untouched (only read-only ops run this session).
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229
