@@ -12,6 +12,7 @@ storage — so they will not disturb an enrollment made under another OS.
 |--------|------|--------------|
 | `probe_getversion.py` | `pyusb` only | Sends `GET_VERSION`; prints raw bytes + decoded fw/product/provision. Self-contained. |
 | `probe_sensor.py` | rev `pydrv` (`tudor`) | Builds `tudor.sensor.Sensor` (GET_VERSION + IOTA reads + sensor-key load); prints identity/config. |
+| `shakedown_00bc.py` | rev `pydrv` (`tudor`) | Phase 1a: exercises more pre-TLS commands (GET_START_INFO, STORAGE_INFO_GET, remote TLS status, IPL IOTA dump) to confirm framing before any write. |
 
 Run as root (the sensor's vendor interface must be free; nothing binds
 `06cb:00bc` in-kernel by default):
