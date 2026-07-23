@@ -509,6 +509,26 @@ response saved around the single destructive command).
   Augusta with no code changes. Remaining for 1d: `FRAME_ACQ`/`FRAME_READ` +
   IPL reconstruction (104×86, 16bpp) into a usable image.
 
+### 2026-07-23 — 1d capture attempt: BLOCKED at FRAME_READ (0x0689)
+First finger capture via `pydrv/tools/capture_pgm.py --capture 5` (over TLS):
+- `init`/TLS OK; finger-remove event OK; `FRAME_ACQ (0x80)` **succeeded**.
+- **`FRAME_READ (0x7f)` failed: `status 0x0689`** on the first frame ⇒ no raw
+  frames captured; IPL path not reached. (Not the IPL question — capture itself
+  diverges.)
+- Root cause is under-documentation: `rev/proto.txt` marks almost all
+  `FRAME_ACQ`/`FRAME_READ` fields `????` and the flags "pure guesswork";
+  `rev.txt` shows the Windows driver hides frame capture behind native `vfm*`
+  IOCTLs (`vfmUtilCaptureImage`/`vfmCaptureStart`/`vfmCaptureProcess`) it never
+  fully decoded. Windows uses **num_frames=1** and **capture flags 7 or 15**
+  (pydrv used num_frames=5 + different flag bytes).
+- ⇒ **Next: RE the frame-capture command builders** (offline, no finger cost):
+  decode `FRAME_ACQ (0x80)` flags + `FRAME_READ (0x7f)` request format from the
+  103 (or 104) DLL (radare2), fix `capture.py`, then do one more finger capture.
+  Empirical flag-tweaking is possible but each try needs a finger press, so
+  RE-first is preferred.
+- Artifacts: `/root/synatudor/1d/1d_capture.log`, `run.out`. Sensor healthy;
+  pairing/TLS unaffected (this is purely the frame-read command).
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229
