@@ -149,6 +149,44 @@ Path A (bmkt/MoC) and Path C (fresh RE) are ruled out by Phase 0. Plan:
   Linux? (Assumed yes via the Windows driver, but unverified.)
 - Does sibling `06cb:00a9` share fw/keys (bonus coverage)?
 
+## Pairing, ownership & reversibility
+How pairing works and whether taking ownership on Linux is permanent. Sourced
+from the Windows-driver RE (`rev/rev.txt`) + the `pydrv` `pair()` implementation.
+
+- **Pairing is a re-doable, host-side credential binding.** `sensor.pair()`
+  issues only `PAIR (0x93)`; it requires provision state 3 and generates a fresh
+  ECC host keypair each time. USAGE: *"you can pair the sensor as many times as
+  you want."* Taking ownership does **not** require the previous owner's key, so
+  either OS can re-claim the sensor.
+- **Pairing ≠ provisioning.** Provision state (`3 = provisioned`) is a deeper
+  state that `pair()` requires but never changes — the sensor stays provisioned.
+- **What breaks when we pair on Linux:** the host binding is overwritten, so
+  Windows' stored pairing (registry `HKCU\Software\Synaptics\PairingData\
+  {DEVICE ID}`) goes stale and the Windows-enrolled templates (bound to that
+  pairing) are lost. **This is NOT permanent and NOT a brick:** Windows re-pairs
+  automatically on the next Windows Hello setup (or after a reinstall + Dell
+  driver); you then just re-enroll fingerprints.
+- **Restore path is "Windows re-pairs," not "Linux unpairs":** pydrv `unpair()`
+  is essentially a no-op reset ("that's all the Windows driver does").
+- **Failure count is a HOST-side Windows throttle, NOT a device fuse.** The
+  driver keeps a "Device Data"/statistics blob (incl. `SetOwnershipFailureCount`
+  and an init failure count) that is **read from the Windows registry**, **reset
+  if older than ~30000 ticks**, **decremented** over time, and **written back**.
+  It increments only on a **failed** `vfmSecurityDoPair`/init (IOCTL 9). Hence:
+  - **Resettable:** delete/edit the Synaptics stats registry key; it also
+    auto-ages and self-decrements; a Windows reinstall wipes it.
+  - **Does not apply on Linux:** pydrv/our driver never maintains it, so Linux
+    pairing neither reads nor increments it.
+  - **No device-side pairing-failure counter is documented.** Residual caveat:
+    the sensor has NVM and `GET_START_INFO` returns a `reset nvinfo` array, so an
+    undocumented device NV counter can't be 100% ruled out — but nothing in the
+    RE indicates a device-side pairing fuse.
+- **Operational rule:** if `pair`/`init` errors, **STOP and diagnose** rather
+  than retrying, to avoid any lockout path (Windows-side or unknown device-side).
+- **Commands we will NEVER run** (deeper, potentially permanent): `PROVISION
+  (0xe)`, `TAKE_OWNERSHIP_EX2 (0x4f)`, `RESET_OWNERSHIP (0x10)`, firmware
+  `update`. `sensor.pair()` only issues `PAIR (0x93)`.
+
 ## Phase 0 running log (diagnostics)
 Append dated entries here as diagnostics run. Newest at the bottom.
 
@@ -261,6 +299,17 @@ Tool: `pydrv/diag/shakedown_00bc.py` (read-only). Results on `06cb:00bc`:
 - **STOP POINT:** paused before 1c (pairing/take-ownership), which is
   destructive to the Windows enrollment. Awaiting explicit go/no-go. Sensor is
   still untouched (only read-only ops run this session).
+
+### 2026-07-23 — permanence/failure-count investigation (RE)
+- Investigated whether pairing is permanent and where the failure count lives
+  (see the new "Pairing, ownership & reversibility" section for details).
+- Conclusion: **taking ownership on Linux is reversible** — Windows re-pairs
+  after reinstall + Dell driver; only the current templates are lost. The
+  ownership/init **failure count is a host-side Windows registry throttle**
+  (auto-ages after ~30000 ticks, self-decrements, wiped on reinstall) and is
+  **not maintained on Linux**; no device-side pairing-failure fuse is documented.
+- This **corrects** the earlier "semi-permanent lockout" caution above — the
+  residual rule is just: stop-and-diagnose on any pair/init error.
 
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
