@@ -22,9 +22,12 @@ Last updated: 2026-07-23
   sensor-key load all succeed). **Chosen path: extend the `rev` reimplementation**
   (Path B). The DLL-relink / blind-`00bc` approach is deprioritized — the `rev`
   path doesn't depend on the 103-vs-104 DLL question at all.
-- **Next gate:** enrolling on Linux requires *pairing* (take-ownership), which
-  re-keys the sensor and **breaks the existing Windows enrollment**. Needs
-  explicit go-ahead before running (see "Strategy → Phase 1").
+- **Status (2026-07-23): Linux now OWNS the sensor (Phase 1c done).** Pairing
+  (`PAIR 0x93`) + full TLS 1.2 session + encrypted commands all work on Augusta
+  with **unmodified** pydrv; frame geometry = 104×86, 16bpp. Pairing data saved
+  at `/etc/tudor/22eb371d62990000.pdata`. **Windows fingerprint enrollment is now
+  broken** (recoverable via Windows re-enroll). Next: **1d** — capture frames +
+  reconstruct an image (IPL). See Phase 1 running log.
 
 ## Hardware / environment facts
 - USB ID: `06cb:00bc`. Internal sensor "product id" (from GET_VERSION) is a
@@ -477,6 +480,34 @@ on the tablet (previously only the read path was exercised). Tool:
 - Re-answer to "is `pair` still correct?": **yes** — it is unavoidable (Linux
   must own the sensor to capture/enroll) and now maximally de-risked; only the
   non-destructive crypto dry-run was worth doing first, and it passed.
+
+### 2026-07-23 — 1c COMPLETE: paired + TLS session works on Augusta
+Executed the destructive pairing gate with the controlled tool
+`pydrv/tools/pair_00bc.py` (COMM/TLS logged; host key saved before + raw PAIR
+response saved around the single destructive command).
+- Fresh OS snapshot `2026-07-23_16-52-42` (ondemand) taken first.
+- **`pair` SUCCEEDED**: `PAIR (0x93)` → `status=0x0000`; sensor **accepted our
+  host cert** ⇒ empirically confirms pydrv's HS key is correct for Augusta.
+  802-byte response parsed; device cert (type 0) returned.
+- **`init-test` (TLS) SUCCEEDED** end-to-end (unmodified pydrv):
+  - Device cert **verified** against sensor key `10.1-kf` ⇒ empirically confirms
+    the sensor-key match.
+  - Full **TLS 1.2 mutual-auth handshake**, negotiated cipher
+    **`TLS_ECC_AES256_GCM_SHA384` (0xc02e)**; encrypted ApplicationData commands
+    (frame-state-get `0x82`, event-config `0x86`) work.
+  - **Frame geometry: 104×86, pixel_bits=16** (x_size=104, y_size=86).
+  - Clean `uninitialize` (TLS close_notify both ways).
+- **Post-pair health**: `GET_VERSION` still `status=0x0000`, fw 10.1,
+  `prov_state=3` — sensor healthy, not bricked.
+- **Windows enrollment is now BROKEN** (as expected; recoverable by re-enrolling
+  under Windows — re-pairing overwrites our binding).
+- **Artifacts (tablet only; secrets not printed/copied off):**
+  `/etc/tudor/22eb371d62990000.pdata` (868 B, 0600) + backup
+  `/root/synatudor/1c/pdata_22eb371d62990000.tpd`; `hostpriv_*.bin` (68 B, 0600);
+  `pair_resp_*.bin` (802 B); logs `1c_pair.log`, `1c_init.log`.
+- **Sensor state: OWNED BY LINUX.** Pair/TLS/secure-command path confirmed on
+  Augusta with no code changes. Remaining for 1d: `FRAME_ACQ`/`FRAME_READ` +
+  IPL reconstruction (104×86, 16bpp) into a usable image.
 
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
