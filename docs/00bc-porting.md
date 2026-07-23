@@ -157,6 +157,8 @@ How pairing works and whether taking ownership on Linux is permanent.
   (`rev/rev.txt`); *inferred* for our 103/Augusta sensor, not dynamically tested.
 - `[STR-103]` — independently corroborated by a **read-only string scan of the
   actual `synaWudfBioUsb103.dll` (Augusta)** on 2026-07-23 (see the Phase 1 log).
+- `[ASM-103]` — corroborated by **disassembly** (radare2/objdump) of the 103 DLL:
+  imports and/or code confirmed.
 - `[PROBE-00bc]` — directly observed on our sensor via read-only probes.
 - `[UNVALIDATED]` — not confirmed by us on 103, dynamically, or at all.
 
@@ -192,16 +194,26 @@ still un-run.
   ("OTP" = one-time-programmable ⇒ a finite, permanent resource). These
   ownership/provision ops are **distinct** from `PAIR (0x93)`; `pydrv.pair()`
   never issues them. This is why the "never run" list below matters.
-- **Failure count is (believed) a HOST-side Windows throttle, not a device fuse.**
-  Presence corroborated on 103 `[STR-103]`: `Device Data` stats blob with
-  `SetOwnershipFailureCount`, `OwnershipFailureCount`, `DeviceInitializeFailures`,
-  `ProvisionFailureCount`, `UpdateFirmwareFailureCount`, `SensorLockFailureCount`,
-  stored under the `Synaptics\PairingData`/stats registry area. The specific
-  behavior — *read from registry, reset if older than ~30000 ticks, decremented,
-  written back; increments only on failed pair/init* — is `[RE-104]` and pending
-  disassembly confirmation on 103 (see Phase 1 log). Consequences (if 104 logic
-  holds): resettable (edit/delete registry key, auto-ages, wiped on reinstall);
-  **not maintained on Linux** (pydrv never reads/increments it).
+- **Failure count is a HOST-side Windows throttle, not a device fuse.** Confirmed
+  on 103 by disassembly `[ASM-103]`: the driver imports `RegOpenKeyEx`/
+  `RegQueryValueEx`/`RegSetValueEx`/`RegCreateKeyEx`/`RegDeleteValue` (host-side
+  registry storage), `CryptProtectData`/`CryptUnprotectData` (DPAPI), and
+  `GetTickCount`/`GetSystemTimeAsFileTime` (tick timing). The failure counters
+  (`SetOwnershipFailureCount`, `DeviceInitializeFailures`, `UpdateFirmwareFailureCount`,
+  `SensorLockFailureCount`, `IptProvisionFailureCount`) are read/written **as a
+  group** in a stats routine at `~0x18000bf00`, and `GetTickCount` is exposed via
+  a thin wrapper (`fcn.180062090`) used by several callers — consistent with
+  tick-based aging.
+  - **NOT confirmed on 103** `[UNVALIDATED]`: the exact arithmetic from `[RE-104]`
+    — *"reset if older than ~30000 ticks, decrement if >4, increment if <5."* The
+    only literal `30000`/`0x7530` in the binary is a **DB/pipe timeout**
+    (`mov dword [rsp+0x38], 0x7530` in a `tudorCmdFormat`/`DatabaseErase` routine),
+    **not** the stats-aging threshold. So do not cite "30000 ticks" as fact; the
+    aging/decrement arithmetic lives deeper in the call tree and was not traced.
+  - **Conclusion still holds:** the counters are host-side registry state (hence
+    resettable and wiped by a Windows reinstall) and are **not maintained on
+    Linux** (pydrv never reads/increments them). Only the precise reset cadence
+    is unverified.
 - **Device-side pairing-failure fuse:** none documented; the sensor does have NVM
   and a `SensorLockFailureCount` / `VCS_RESULT_SENSOR_OUT_OF_OTP_OWNERSHIP` exist,
   so a device-side lock around *ownership/OTP* is plausible — but that is the
@@ -336,6 +348,30 @@ Tool: `pydrv/diag/shakedown_00bc.py` (read-only). Results on `06cb:00bc`:
   **not maintained on Linux**; no device-side pairing-failure fuse is documented.
 - This **corrects** the earlier "semi-permanent lockout" caution above — the
   residual rule is just: stop-and-diagnose on any pair/init error.
+
+### 2026-07-23 — 103 binary validation (objdump + radare2)
+Independent, read-only analysis of the extracted `synaWudfBioUsb103.dll`
+(Augusta) to check the pairing/failure-count claims (previously only `[RE-104]`).
+- **String scan** confirmed: `CBiometricDevice::DoPairing/DoUnpairing/
+  OnResetOwnership/ProcessPairing`, registry path `Synaptics\PairingData`,
+  DPAPI (`CryptProtectData`/`CryptUnprotectData`), basic/advanced pairing,
+  on-device "host partition" pairing copy, and OTP ownership
+  (`VCSFW_CMD_{PROVISION,TAKE_OWNERSHIP_EX2,RESET_OWNERSHIP}`,
+  `VCS_RESULT_SENSOR_OUT_OF_OTP_OWNERSHIP`).
+- **Imports (`objdump -p`)** confirmed host-side mechanism: `RegOpenKeyEx*`,
+  `RegQueryValueEx*`, `RegSetValueEx*`, `RegCreateKeyEx*`, `RegDeleteValueA`;
+  `CryptProtectData`/`CryptUnprotectData`; `GetTickCount`,
+  `GetSystemTimeAsFileTime`, `QueryPerformanceCounter`.
+- **Disassembly (radare2)**: failure counters read/written as a group at
+  `~0x18000bf00` (xrefs to the property-name strings at `0x18000adXX`/`0x18000bfXX`);
+  `GetTickCount` wrapper at `fcn.180062090`.
+- **Retraction:** the "reset if older than ~30000 ticks" figure is **NOT** the
+  stats-aging threshold on 103 — the sole `0x7530` immediate (`0x1800a9106`) is a
+  DB/pipe timeout in a `tudorCmdFormat`/`DatabaseErase` routine. The exact aging/
+  decrement arithmetic was not traced; treat it as unverified.
+- **Net:** host-side/registry/DPAPI/tick architecture and OTP-ownership-is-the-
+  permanent-op are validated on 103; the precise failure-count reset cadence is
+  not. Pairing reversibility conclusion unchanged.
 
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
