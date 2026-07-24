@@ -34,18 +34,37 @@ landmarks) distilled from the `re`-subagent fanout, so it survives compaction.
   reconstruct an image (IPL). See Phase 1 running log.
 
 ## Next-session handoff (start here to avoid duplicate effort)
-State: pairing + TLS + secure command channel all WORK on `06cb:00bc`. The open
-problem is **image capture**. Raw `FRAME_ACQ`/`FRAME_READ` is a dead end for us
-(see `frame-capture-re.md`): fully validated + armed, it still returns
-`0x0689 (SENSOR_MALFUNCTIONED)` because it's a diagnostic/IPL-mode-gated path.
-**Next goal: the production capture path** = `vfmUtilCaptureImage`
-(`fcn.180059420`) → proto-IOCTL **0x65 / 0x191** + finger-detect
-(`fcn.1800609b0`, `SSI_CAPTURE_STATUS_FD_DETECTED`) + `EVENT_CONFIG`, then
-**host-side matching** (no on-chip match opcodes exist; Windows uses a proprietary
-matcher — a Linux port needs libfprint/NBIS-style image processing).
+State: pairing + TLS + secure command channel all WORK on `06cb:00bc`. **Production
+capture-path RE is DONE (2026-07-24) and produced a pivotal correction — see
+`frame-capture-re.md` → "PRODUCTION CAPTURE-PATH RE (2026-07-24)".**
+
+**Corrected model (supersedes the earlier premise below):** `00bc` is a
+**MATCH-ON-CHIP** sensor. The Windows production path matches on-chip
+(Match-In-Sensor / MFW) and **never pulls a raw image to the host**. What was
+called "proto-IOCTL 0x65/0x191" are actually **host-side WBDI notification event
+ids** (`_vfmUtilEventCreate`), not wire ops. `vfmUtilCaptureImage (fcn.180059420)`
+is the **wake-on-finger** path (24-byte metadata descriptor, no pixels).
+`FRAME_READ (0x7f)`/`FRAME_STREAM (0x8b)` are init/self-test/diagnostic only, which
+is why they return `0x0689`. A dormant Match-On-Host path exists but is not used.
+
+**DECIDED (2026-07-24): pursue MOC (Match-In-Sensor).** The on-chip enroll/verify
+command spec is now RE'd — see `frame-capture-re.md` → "MOC COMMAND SPEC
+(2026-07-24)": enroll = VCSFW `0x96` (QM struct sub-op; AddImage→60-byte stat; loop
+to progress==100 → `WRITE_OBJECT 0xa2`); verify/identify = `0x99` (36-byte QM
+result; score > host threshold); templates = DB2 objects (type tag `0x20`).
+Corrected pydrv DB2 bug: `DB2_CLEANUP`=`0xa4` (pydrv wrongly `0xa3`);
+`DB2_WRITE_OBJECT 0xa2` missing. **Phase C = implement this in `pydrv/` (gated).**
+Fallback if MOC stalls: image capture / Match-On-Host (unlock the diagnostic
+FRAME_READ path past `0x0689`), else Windows/Frida dynamic capture.
 
 Do NOT re-try (already ruled out on-device): raw `FRAME_READ` seq sweep 0..7 (all
 0x0689); both `FRAME_ACQ` modes (17B & 25B); `EVENT_CONFIG(0x1000)` arm alone.
+
+--- superseded premise (kept for context) ---
+~~Next goal: the production capture path = vfmUtilCaptureImage → proto-IOCTL
+0x65/0x191 + finger-detect + host-side matching (no on-chip match opcodes exist).~~
+The 2026-07-24 RE showed on-chip match opcodes DO exist (`mis*`) and 0x65/0x191 are
+host events, not IOCTLs.
 
 **Re-staging the Windows DLLs for RE** (temp copies under
 `/var/folders/kv/.../T/opencode/re-frameacq/` are ephemeral):
@@ -652,6 +671,61 @@ the protocol prototype doesn't reproduce). Options going forward:
 - **(C) Reframe as match-on-chip**: drive enroll/verify on-chip via the WBDI
   engine-adapter protocol rather than host-side image capture.
 Decision pending (see chat).
+
+### 2026-07-24 — production-capture RE fanout: PIVOTAL — `00bc` is MATCH-ON-CHIP
+Executed the planned Phase A (staged both adapter DLLs + r2 seed dumps into the
+`re` sandbox) and Phase B (7-way `re` fanout on `synaWudfBioUsb103.dll` +
+`synaFpAdapter103.dll`, cross-checked 104). Full detail + address/opcode tables in
+[`frame-capture-re.md`](frame-capture-re.md) → "PRODUCTION CAPTURE-PATH RE
+(2026-07-24)". Headline results (103≡104):
+- **The Windows production path matches ON-CHIP** (Match-In-Sensor / MFW); it never
+  pulls a raw image to the host. The adapter (`synaFpAdapter103.dll`) is a thin
+  `DeviceIoControl` shim forwarding an **opaque 88-byte feature-set descriptor** +
+  matcher commands to the sensor; **no host image processing exists** in it.
+- **`0x65`/`0x191` are host-side WBDI notification event ids, NOT wire ops** (built
+  by `_vfmUtilEventCreate`). The handoff's "proto-IOCTL 0x65/0x191" premise was
+  wrong.
+- **`FRAME_READ (0x7f)`/`FRAME_STREAM (0x8b)` are init/self-test/diagnostic only**;
+  the `vfmUtilCaptureImage` graph is the **wake-on-finger** path and transports no
+  pixels (its pixel-memcpy is dead code) — it yields a 24-byte metadata descriptor.
+  This explains the `0x0689` wall: raw frame read is a diagnostic path gated behind
+  the SensorCfg/FrameDim/IplIota "playback" arming.
+- A dormant **Match-On-Host ("Moh")** capability exists in the driver but is not the
+  exercised path (this is what the earlier "Chunk 3" pass mistook for host-matching).
+- Validated infra: proto-IOCTL map (`0x67`=only bulk cmd channel; `0x69`=7-byte
+  cached interrupt = pydrv `get_event_data`); finger-detect = EVENT_CONFIG ids
+  {1,2} + EVENT_READ→FINGER_PRESS(0x80). pydrv's event id↔mask table is correct.
+- **STRATEGIC FORK (decision pending, gate before any impl.):**
+  (1) **MOC / on-chip** — RE the `mis*` enroll/verify/identify VCSFW opcodes + QM
+  struct over the working TLS channel (mirrors libfprint bmkt on `06cb:00bd`; no
+  host image/NBIS); or (2) **image capture / Match-On-Host** — unlock the diagnostic
+  FRAME_READ path past `0x0689` via the IPL-IOTA "playback" arming, then host
+  matching. Per the session decision, Windows/Frida dynamic capture is the fallback
+  if the chosen strategy stalls in static RE.
+
+### 2026-07-24 — MOC direction chosen + on-chip command spec RE'd (3-way fanout)
+Chose Strategy 1 (Match-In-Sensor). A 3-way `mis*`/DB2 `re` fanout reverse-engineered
+the full on-chip enroll/verify/store command spec (durable ref:
+`frame-capture-re.md` → "MOC COMMAND SPEC (2026-07-24)"). Highlights:
+- **Enroll** = VCSFW `0x96` (QM command struct selects sub-op: Start/AddImage/
+  Finish). `misEnrollAddImage` returns a **60-byte QM stat** (progress/quality/
+  templateCount/redundant/rejected); loop AddImage (each preceded by a finger-detect
+  + FRAME_ACQ arm; **host sends no pixels**) until **progress==100**, then Commit →
+  persist template via **DB2 WRITE_OBJECT `0xa2`**.
+- **Verify/identify** = VCSFW `0x99` `misIdentifyMatchCmd`. Request = nTemplates +
+  16-byte template refs (or feature blob); reply = **36-byte QM result** at +0x1c
+  (size u32 @+0x10). **Match iff score > host-supplied threshold.** Adaptive
+  `misAuthUpdateTemplate` → optional DB2 rewrite.
+- **Templates** = DB2 objects on sensor flash, **type tag `0x20`**; loaded via
+  GET_DB_INFO `0x9e`/GET_OBJECT_LIST `0x9f`/GET_OBJECT_INFO `0xa0`/GET_OBJECT_DATA
+  `0xa1`. **pydrv DB2 enum bug found:** `DB2_WRITE_OBJECT 0xa2` missing;
+  `DB2_CLEANUP` is `0xa4` but pydrv aliases it to `0xa3` (== DELETE_OBJ).
+- Possible SAP/secure-storage gate on writes (`AuthenticateUserStorageOnSensor`);
+  reads likely fine over existing TLS — verify empirically.
+- All little-endian. Cross-checked 103 vs 104 (104/`00be` looks match-on-HOST — why
+  `rev`/pydrv's image approach was built for `00be` and does not fit `00bc`).
+- **Next (gated): Phase C** — implement `mis*` + QM struct + enroll/verify state
+  machines + DB2 store in `pydrv/`, validate on-device (enroll finger → verify match).
 
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):

@@ -12,13 +12,27 @@ independently-validated binary RE of the capture protocol). Keep both up to date
 - **DONE:** Linux OWNS the sensor — pairing + TLS 1.2 + encrypted command channel
   all work on `06cb:00bc` (Augusta, fw 10.1). Windows fingerprint enrollment is
   now BROKEN (expected; recoverable via Windows re-enroll).
-- **OPEN PROBLEM:** image capture. Raw `FRAME_ACQ`/`FRAME_READ` is a dead end
-  (returns `0x0689` even fully armed — it's a diagnostic/IPL-gated path).
-  **Next:** the production capture path (proto-IOCTL `0x65`/`0x191` + finger-detect
-  + host-side matching). See the "Next-session handoff" in `docs/00bc-porting.md`.
+- **DONE (2026-07-24):** production capture-path RE (7-way `re` fanout). **PIVOTAL:
+  `00bc` is a MATCH-ON-CHIP sensor** — Windows matches on-chip (Match-In-Sensor)
+  and never pulls a raw image to the host. "proto-IOCTL 0x65/0x191" were actually
+  host-side WBDI event ids (not wire ops); `vfmUtilCaptureImage` is the
+  wake-on-finger path (no pixels); `FRAME_READ`/`FRAME_STREAM` are diagnostic-only
+  (hence `0x0689`). See `docs/frame-capture-re.md` → "PRODUCTION CAPTURE-PATH RE".
+- **DECIDED + RE'd (2026-07-24): pursue MOC (Match-In-Sensor).** The on-chip
+  enroll/verify command spec is now reverse-engineered (3-way `mis*`/DB2 fanout):
+  enroll = VCSFW `0x96` (QM struct sub-op; AddImage→60-byte stat; loop to
+  progress==100); verify/identify = `0x99` `misIdentifyMatchCmd` (36-byte QM result;
+  score > host threshold); templates persist as DB2 objects (type tag `0x20`) via
+  `WRITE_OBJECT 0xa2`. **Corrected pydrv DB2 bug: `DB2_CLEANUP` is `0xa4` (pydrv
+  wrongly aliases it to `0xa3`); `DB2_WRITE_OBJECT 0xa2` is missing.** Full spec:
+  `docs/frame-capture-re.md` → "MOC COMMAND SPEC (2026-07-24)".
+- **NEXT — Phase C (gated, awaiting go):** implement the `mis*` 0x96/0x99 + QM
+  struct + enroll/verify state machines + DB2 template store in `pydrv/`, then
+  validate on-device (enroll a finger, verify match). Deferred image-capture /
+  Match-On-Host path is the fallback only if MOC stalls.
 - **Binary RE:** use the local **`re`** subagent (`.opencode/agent/re.md`, Opus,
-  gitignored) — binary-only by default; stage DLLs per the handoff (esp.
-  `synaFpAdapter103.dll`, not yet staged).
+  gitignored). Both adapter DLLs (`synaFpAdapter103/104.dll`) + USB DLLs + r2 seed
+  dumps are now staged in the sandbox `re-frameacq/`.
 
 ## Quick facts
 - Working branch: **`00bc-dev`** (off `origin/rev`) — Path B development on the

@@ -352,3 +352,242 @@ analysis are in [`00bc-porting.md`](00bc-porting.md).
   = opcode + 400-byte host cert; response = `0x322` bytes = status(2) +
   host cert(400) + device cert(400). Pairing data blob = privkey(0x44) +
   host cert(400) + sensor cert(400) = 868 bytes.
+
+## PRODUCTION CAPTURE-PATH RE (2026-07-24) — PIVOTAL FINDING: `00bc` IS A MATCH-ON-CHIP SENSOR
+
+A 7-way `re`-subagent fanout against the **production** capture code (Phase A/B of
+the session plan) overturns the handoff premise ("production enroll/verify uses
+`vfmUtilCaptureImage` → proto-IOCTL 0x65/0x191 + finger-detect + HOST-side
+matching"). The corrected model, cross-checked 103≡104:
+
+- **The Windows production path matches ON-CHIP (Match-In-Sensor, "Mis"/MFW), not on
+  the host.** It never pulls a raw image to the host. `[RE-7, high conf]`
+- **`0x65`/`0x191` are host-side WBDI notification event ids** (built by
+  `_vfmUtilEventCreate` `fcn.1800604e0`, dispatched to a WBF callback), **NOT wire
+  ops / proto-IOCTLs.** Do not send them to the sensor. `[RE-5, RE-6, high conf]`
+- **`FRAME_READ (0x7f)` and `FRAME_STREAM (0x8b)` are quarantined to
+  init/self-test (`_tudorInitDevice fcn.18007c320`) and the diagnostic
+  `_tudorIoctlExt` dispatcher** — they are NOT on any production capture path.
+  This is why our bare FRAME_ACQ→FRAME_READ returns `0x0689`: it's a diagnostic
+  path gated behind the SensorCfg/FrameDim/IplIota "playback" arming. `[RE-6, high conf]`
+- **The `CBiometricDevice::CaptureImage → vfmUtilCaptureImage (fcn.180059420)`
+  graph is the WAKE-ON-FINGER / finger-presence path** (fed by
+  `CBiometricDevice::NotifyWakeThread fcn.180006860`). It transports **no pixels**
+  (its pixel-memcpy at `0x180059b6a` is dead code: src `var_80h`/len `var_78h`
+  stay 0), yielding only a **24-byte metadata descriptor** at `[hSensor+0xa8]`
+  (geometry words `[hSensor+0x77]`/`[+0x7f]`, a DRDY event word, format tag
+  `0x50`). `[RE-6, high conf]`
+
+### How Windows actually does enroll/verify (Match-In-Sensor)
+- The WBDI adapter `synaFpAdapter103.dll` is a thin shim: it talks to the UMDF USB
+  driver purely via **`CreateFileW` + `DeviceIoControl`** (imports confirmed; the
+  USB DLL exports only `FxDriverEntryUm` — no callable capture/match exports).
+  `[RE-7]`
+- Adapter IOCTL codes (device type `0x44`, METHOD_BUFFERED):
+  `0x442058`(func 0x816)=**primary VCSFW command channel** (opcode = inBuffer[0],
+  inBuf 0x1088 / outBuf 0x18ac); `0x44202c`=CreateEnrollment, `0x44200c`=Update,
+  `0x442010`=Commit, `0x442014`=CheckForDuplicate, `0x440014`(func 0x005)=
+  **SensorAdapterStartCapture**; low-func control ops `0x002..0x00d` via driver
+  `fcn.1800680b0`. `[RE-7]`
+- `EngineAdapterAcceptSampleData` (`fcn.180001500`) requires size **== 0x58 (88)**
+  and copies an **opaque 88-byte feature-set/template descriptor** (5×movups+movsd)
+  into `[ctx+0x38]` — **no per-pixel work; the adapter has zero image/width/height/
+  stride/bpp strings and no `w*h*bpp` allocation.** `[RE-7, high conf]`
+- The matcher lives in the driver's `synaLib`/`CEisMisEIV` ("Match In Sensor")
+  layer as a **thin command wrapper to the sensor's Matcher FirmWare (MFW)**:
+  `mis{InitModule,EnrollStart,AddImage,GetTemplate,Finish}`,
+  `misAuthImageToTemplates`, `misIdentifyMatchCmd (fcn.1800a4f20)`. Telemetry
+  proves on-chip: `"Mismatch of qm struct size on host and MFW."`,
+  `" #### Match Score 0x%X  threshold 0x%X ###"` (score+threshold **returned by the
+  sensor**), `"Enroll stats: progress-%d, templateCount-%d, redundant-%d
+  quality-%d rejected-%d"`. `[RE-7, high conf]`
+- `VCS_RESULT_MATCHER_*` (incl. `MATCHER_MATCH_FAILED`, base @ `0x180146628`) are
+  **firmware matcher reply statuses** — consistent with on-chip matching.
+- A **Match-On-Host ("Moh") capability EXISTS but is dormant/secondary**:
+  `_vfmUtilMohMatchImageToTemplates` (104 `fcn.18005da60`), `hMatcher`,
+  `_vfmMatchImageToTemplates`; the driver imports `mscoree.dll` (a managed matcher
+  could load). The **exercised** enroll/verify chain is `Mis` (on-chip). Whether
+  `Moh` is ever selected is a runtime/config decision **not resolvable statically**.
+  → *This dormant Moh path is what the earlier "Chunk 3" pass mistook for
+  "host-matched, no on-chip match"; Chunk 3 also wrongly concluded there are no
+  enroll/match opcodes — the `mis*` matcher commands ARE ordinary VCSFW opcodes
+  (builder `fcn.1800a58c0`, opcode from `cx`).*
+
+### Validated infrastructure (this session)
+- **proto-IOCTL dispatcher `fcn.180085090`** (decodes DeviceIoControl func 1..0x69):
+  `0x65` DEVICE_INFO (VID/PID, 6-byte reply, USB device descriptor); `0x66`
+  GET_TLS_STATE (2-byte, EP0 vendor ctrl); **`0x67` SEND_CMD_DATA = the ONLY
+  large/bulk VCSFW command channel** (bulk write + bulk read EP 0x81, TLS-wrapped;
+  generic sender `fcn.18008a570` at `edx=0x67`, re-allocs reply to wire-reported
+  length, TLS-unwrap `fcn.18008df80`); `0x68` DEVICE_RESET/WRITE_DFT; **`0x69`
+  INTERRUPT_DATA_GET = host-cached 7-byte interrupt status (NO USB)** from
+  `[handle+0x8c]`/`[+0x90]` (== pydrv `get_event_data()` on EP 0x83); `0x6a`→default
+  error `0x71`. `[RE-5, high conf]`
+- **Finger-detect gate** (`CCaptureImage::CheckForFingerPresence fcn.18000ed9c`):
+  `EVENT_CONFIG(0x86)` with event ids **{FINGER_PRESS=1, FINGER_REMOVE=2}**
+  (Windows mask 0x180), then `EVENT_READ(0x87)` until a decoded event **== 0x80
+  (FINGER_PRESS)**; then re-arm mask 0x100 to await removal. pydrv's
+  `SensorEventType` id↔mask table (1↔0x80, 2↔0x100, …, 24↔0x1000) is **correct**;
+  event-read parse (12-byte records, byte0=id, seq `& 0x1f`) matches. `[RE-2, high conf]`
+- **Production arming = EVENT_CONFIG(0x86 mask 0x1000 DRDY) + FRAME_ACQ(0x80) only**;
+  the `_tudorIoctlExt` SensorCfg/FrameDim/IplIota "playback" load is **host-side
+  (no wire)**. Endian helpers are identity (all wire fields LE). `[RE-4, RE-6]`
+
+### Function/ID reference (103 Augusta; 104 differs only in layout unless noted)
+| item | 103 addr / value |
+|---|---|
+| `vfmUtilCaptureImage` (wake path) | `fcn.180059420` (104 `fcn.18005ead0`) |
+| `CBiometricDevice::CaptureImage` | `fcn.18000ebf4` |
+| `CBiometricDevice::NotifyWakeThread` (thread entry) | `fcn.180006860` |
+| `CCaptureImage::CheckForFingerPresence` | `fcn.18000ed9c` (104 `fcn.180023044`) |
+| SSI capture state machine (FD_DETECTED/RESTART) | `fcn.1800609b0` |
+| `tudorCaptureStart` (EVENT_CONFIG+FRAME_ACQ) | `fcn.18007e7d0` |
+| `tudorCaptureProcess` (event/status state machine) | `fcn.18007ebc0` |
+| `tudorCaptureGetImage` (hands out 24-byte desc) | `fcn.18007f240` |
+| `_tudorCaptureImageHeaderFill` (24-byte desc) | `fcn.18007f8c0` |
+| proto-IOCTL 0x69 status get | `fcn.18007f780` |
+| proto-IOCTL dispatcher | `fcn.180085090` |
+| generic VCSFW sender (proto 0x67) | `fcn.18008a570` |
+| `_vfmUtilEventCreate` (0x65/0x191 host events) | `fcn.1800604e0` (104 `fcn.180060d10`) |
+| matcher: `misIdentifyMatchCmd` / builder | `fcn.1800a4f20` / `fcn.1800a58c0` |
+| FRAME_READ(0x7f) builder (diagnostic/init only) | `fcn.180086b60` |
+| FRAME_STREAM(0x8b) builder (diagnostic/init only) | `fcn.180088490` |
+| adapter primary cmd IOCTL / StartCapture IOCTL | `0x442058` / `0x440014` |
+| `EngineAdapterAcceptSampleData` (88-byte desc) | adapter `fcn.180001500` |
+
+Staged for this RE (sandbox `re-frameacq/`): `synaFpAdapter103.dll`,
+`synaFpAdapter104.dll` (both extracted), plus `prod_seedmap.md` and per-task r2
+dumps `prod_re1_flow.txt`/`prod_re2_fingerdetect.txt`/`prod_re3_getimage.txt`/
+`prod_re4_arming.txt`/`prod_afl_103.txt`.
+
+### STRATEGIC FORK for the Linux port (decision pending — DO NOT proceed to impl. yet)
+The session goal ("get a fingerprint image on Linux via the production path") is
+**not achievable as framed**: Windows production has no host-image path — it
+matches on-chip. Two real options remain:
+
+1. **MOC / on-chip (Match-In-Sensor) — NEW, mirrors how Windows actually works and
+   how libfprint's `synaptics` bmkt driver handles the adjacent `06cb:00bd`.**
+   RE the `mis*` VCSFW enroll/verify/identify opcodes + QM struct over the existing
+   (working) Tudor TLS channel; drive on-chip enroll/verify; no host image, no NBIS.
+   pydrv already has DB2/STORAGE template opcodes (currently unused).
+2. **Image capture / Match-On-Host — the original `rev`/pydrv approach + this
+   session's stated goal.** Requires unlocking the diagnostic FRAME_READ/FRAME_STREAM
+   path past `0x0689` by replicating the SensorCfg/FrameDim/IplIota "playback"
+   arming (host-side blob loads that likely must be pushed to the sensor), then
+   host matching (libfprint/NBIS). This is the path that "hit multiple dead ends"
+   upstream; static RE has plateaued on the exact arming.
+
+Open items: exact `mis*` opcode bytes + QM struct (Strategy 1); the precise
+IPL-IOTA playback push that unlocks raw frames (Strategy 2); whether `Moh` is ever
+selected on Windows (needs dynamic capture). Per the session's "static-first, Frida
+only if stuck" decision, a Windows dynamic capture is the fallback if the chosen
+strategy stalls in static RE.
+
+## MOC COMMAND SPEC (2026-07-24) — on-chip enroll/verify for the Linux port
+Direction chosen: **Strategy 1 (Match-In-Sensor)**. This is the durable spec for
+Phase C (pydrv). RE'd from `synaWudfBioUsb103.dll` (3-way `mis*`/DB2 fanout),
+cross-checked vs 104. **All little-endian.** Confidence high unless marked.
+
+### Model
+`00bc`/Augusta matches ON-CHIP: the sensor captures + extracts + matches + stores
+templates internally. **The host never sends or receives pixels.** The host only:
+(a) arms capture (finger-detect + FRAME_ACQ), (b) issues small **matcher commands**
+(a tiny VCSFW opcode + a "QM command struct" body), (c) persists/loads template
+**blobs** via DB2. (Contrast: 104/Tudor `00be` appears to match on HOST via a
+bundled QM math lib — which is why the `rev`/pydrv image-capture design was built
+for `00be` and does NOT apply to `00bc`. `[MOC-1]`)
+
+### Matcher command channel
+- Small opcode set multiplexed by a **QM command struct** in the request body;
+  sub-operation selected by fields in that struct, not distinct opcodes.
+  - **`0x96`** = enroll-family (misEnrollStart / AddImage / Finish/Commit; plus a
+    nonce/challenge variant). Builder `fcn.1800a4600` (AddImage), `fcn.1800a4120`
+    (start/nonce), `fcn.1800a4bf0` (finish). QM struct size validated **60 (0x3c)**.
+  - **`0x99`** = `misIdentifyMatchCmd` (verify/identify). Builder `fcn.1800a4f20`.
+    QM result size validated **36 (0x24)**.
+- Generic matcher-cmd allocator `fcn.1800a58c0(cx=opcode, edx=body_len)`: wire buf =
+  `[opcode:u8][zero body of body_len]`; sent via sensor-iface vtbl `[+0xa0]` =
+  `tudorSendAnyCommand` (= normal TLS-wrapped SEND_CMD_DATA / proto-IOCTL 0x67).
+- LE field helpers `fcn.1800b6380`(u32)/`fcn.1800b63b0`(u16) are identity.
+- mis module handle global `[0x18015af98]` (null-checked before every mis op).
+
+### ENROLL (opcode 0x96)
+State machine: `misInitModule` → `CEisMisEIV::EnrollmentCreate` → **misEnrollStart**
+→ loop{ arm capture (see below) → **misEnrollAddImage** → read 60-byte stat →
+inspect progress } until **progress==100** → **misEnrollFinish/EnrollmentCommit**
+→ **DB2 WRITE_OBJECT (0xa2)** to persist. Failure → `EnrollmentDiscard`.
+- **Host sends NO image.** `misEnrollAddImage` body is a few bytes (opcode + u16
+  sub-op=2 + small QM header); the sensor extracts features from its internally
+  captured frame. `[MOC-1, high conf]`
+- **AddImage 60-byte QM stat** (offsets within the returned stat struct): `+0x02`
+  u8 qmStatus; `+0x14` u32 templateCount; `+0x18` u32 quality (==1 ⇒ redundant);
+  `+0x1c` u32 progress %; `+0x24` u32 redundant/reject; `+0x28` u16 finalQuality.
+  Log: "Enroll stats: progress-%d, templateCount-%d, redundant-%d quality-%d
+  rejected-%d". Result codes: **305 (0x131)** = more images needed; **304 (0x130)**
+  = failed / fixed-pattern (fixed-pattern limit = 4). No fixed image count — loop
+  until progress 100.
+- Enrolled template handle lives at `session_ctx+0x60`; `misEnrollGetTemplate`
+  returns it locally (no wire cmd). `misEnrollSessionSave/Restore` (de)serialize the
+  0x70-byte session for pdata persistence `[layout UNKNOWN, medium]`.
+
+### VERIFY / IDENTIFY (opcode 0x99, `misIdentifyMatchCmd`)
+State machine: load templates from flash → `SetTemplateList` → `misAuthStart`
+(allocs 0xA8 session) → arm capture → `misAuthImageToTemplates` → **misIdentifyMatchCmd
+(0x99)** → parse 36-byte result → **score > host-supplied threshold ⇒ MATCH** →
+optional `misAuthUpdateTemplate` (+ DB2 rewrite) → `misAuthGetResult` → `misAuthFinish`.
+- **0x99 request** (after opcode byte): `u32 nTemplates`; then
+  IF nTemplates>0: `u32 list_len(=n*16)` + `n × 16-byte template refs (TUIDs)`;
+  ELSE: `u32 blob_len` + `feature_blob`. (A 16-byte header block tagged `0x642` is
+  attached by the 3-blob sender.)
+- **0x99 reply** (base = reply+2 after 2-byte status): `+0x10` u32 qm_result_size
+  (==0x24/36); `+0x14` u32 auxA_len; `+0x18` u32 auxB_len; `+0x1c` 36-byte QM result;
+  then auxA, auxB (palTagVal containers, tags 1/2/3 → matchStrength/index/update).
+  Match fields (score/matchIndex/matchStrength/templateUpdate/updatedRef) — meaning
+  HIGH, exact intra-36B offsets MEDIUM (103 reads them via tag-value, not fixed
+  slicing). **Threshold is host-supplied** (from host session state), sensor returns
+  raw score. `misAuthGetResult` sub-ops `0x2711/0x2712/0x2713` fetch matched-TUID /
+  payload / signed-result artifacts.
+
+### Capture arm (precedes each AddImage / match) — reuses known frame infra
+`EVENT_CONFIG(0x86)` finger/DRDY arm → `FRAME_ACQ(0x80)` → wait finger-detect via
+`EVENT_READ(0x87)` (finger ids {1,2}, wait FINGER_PRESS 0x80) / cached interrupt.
+Wake-on-finger; no host pixels. (Exact per-enroll mask/order MEDIUM — reuse the
+finger-detect gate from the production-path section above.)
+
+### DB2 template storage (opcodes CORRECTED vs pydrv)
+Request wire = `[opcode:u8][body]` (allocator `fcn.1800af420`, sender `fcn.1800af510`
+via `tudorSendAnyCommand`). **Templates are DB2 objects on sensor flash; object type
+tag = `0x20`.** Host caches 112-byte descriptors + serialized blobs; sensor copy is
+authoritative.
+| cmd | opcode | notes |
+|---|---|---|
+| GET_DB_INFO | **0x9e** | req `pack("<BB",0x9e,1)`; resp has per-type object counts (types 1/2/3) |
+| DB_OBJECT_CREATE | 0x47 | legacy DB1; NOT the template path |
+| GET_OBJECT_LIST | **0x9f** | req = op + type(u8) + 3 pad + 16-byte UID; resp = status + count×16-byte UIDs |
+| GET_OBJECT_INFO | **0xa0** | req like LIST; resp payload size @ objinfo+0x2e |
+| GET_OBJECT_DATA | **0xa1** | req = op+type+16B UID; resp: datalen u32 @+4, payload @+8 (**template blob read**) |
+| **DB2_WRITE_OBJECT** | **0xa2** | **MISSING in pydrv.** type2: op+type+const1+16B UID + len u32@0x1d + payload@0x21 |
+| DELETE_OBJECT | **0xa3** | req = op+type+16B UID |
+| **DB2_CLEANUP** | **0xa4** | **pydrv wrongly aliases this to 0xa3.** body minimal `[UNKNOWN, medium]` |
+| FORMAT | **0xa5** | destructive DB2 wipe `[body untraced]` |
+- STORAGE_PART_{READ,WRITE} 0x40/0x41 & STORAGE_INFO_GET 0x3e = host-partition
+  (pairing-data) ops, NOT the per-template path.
+
+### Secure storage gating (verify empirically)
+`CEisMisEIV::AuthenticateUserStorageOnSensor`, `SapRequest`, secureBio nonce exist =
+a SAP / secure-storage auth. Plain DB2 senders issue 0x9e/0x9f/0xa0/0xa1/0xa2
+directly over the established TLS channel with no visible per-op SAP handshake ⇒
+**reads likely work without SAP; writes MAY require it.** Top empirical unknown.
+`[MOC-3, medium]`
+
+### pydrv gaps to close (Phase C)
+- pydrv has **no** enroll/verify/identify/matcher code. Add the `mis*` 0x96/0x99
+  command builders + QM struct (sub-op selector, 60B/36B) + the enroll/verify state
+  machines + capture-arm reuse.
+- Fix `comm.py` DB2 enum: add `DB2_WRITE_OBJECT=0xa2`; fix `DB2_CLEANUP=0xa4` (it is
+  wrongly `0xa3`, aliasing DELETE_OBJ). Add DB2 request/response (list/info/data/write).
+- Template object type tag = `0x20`.
+- Residual UNKNOWNs to pin during impl (likely need on-device or one more RE pass):
+  exact 36B match-result offsets; 60B enroll-stat already mapped; DB2_CLEANUP/FORMAT
+  bodies; whether SAP gates writes; misEnrollSessionSave blob layout; the exact
+  per-image EVENT_CONFIG mask for enroll.
