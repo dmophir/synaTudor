@@ -303,7 +303,22 @@ So the ONLY missing on-wire step vs pydrv is the frame-ready `EVENT_CONFIG`.
   for finger masks empirically, but the capture fix sends the **exact driver
   bytes** to be safe (`capture.py` `capture_frames`, committed `f092167`).
 - **Fix applied:** `capture_frames()` now sends `EVENT_CONFIG(0x1000)` immediately
-  before `FRAME_ACQ`. Pending on-device retest.
+  before `FRAME_ACQ`.
+- **RETEST RESULT (2026-07-24): arming is NECESSARY-CONTEXT but NOT SUFFICIENT.**
+  COMM log confirmed the exact driver-format `EVENT_CONFIG(0x1000)` went out
+  (`86 | 01000000 00×3 | 01000000 00×3 | count=1`, status 0x0000), `FRAME_ACQ`
+  (mode-3) accepted (status 0x0000), frame latched (`02000000000101`, b0=2) — and
+  `FRAME_READ(seq=0)` STILL returns **0x0689**. So EVENT_CONFIG(0x1000) alone does
+  not unlock raw reads.
+- **Conclusion:** the raw `FRAME_ACQ`/`FRAME_READ` path needs MORE than the frame
+  event arm — consistent with Chunk 3: it is gated behind the `_tudorIoctlExt`
+  diagnostic/IPL "playback" mode, which likely pushes SensorCfg/IPL-IOTA state to
+  the sensor (or sets a mode) beyond what we've replicated. **Recommended pivot:
+  the production capture path (`vfmUtilCaptureImage` → proto-IOCTL 0x65/0x191 +
+  finger-detect + host software matcher)** rather than fighting the diagnostic
+  raw-read path. (Deferred to a fresh session per plan.)
+- Recovery note: the failed capture again left a half-open TLS session
+  (plaintext → `15 03 03…` alert); cleared via USB `dev.reset()` + ~30s idle.
 
 ## Appendix — pairing / HS-key RE landmarks (from 1b.6, main-session RE)
 Kept here so the function addresses aren't lost; the semantics + reversibility
