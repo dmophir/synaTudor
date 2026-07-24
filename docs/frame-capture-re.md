@@ -238,7 +238,51 @@ reply failed with status= %d:"). Success = {0x000,0x412,0x5cc}. Selected map
   NOT mislead the byte-level RE, but they omitted this production-vs-diagnostic
   split and the mode-arming precondition.
 
-(Chunk 2 — FRAME_READ loop/seq detail — subagent report pending recovery.)
+### Chunk 2 — FRAME_READ loop/seq: CONFIRMED (with corrections)
+103 addrs: FRAME_READ builder **`fcn.180086cf0`** (opcode `0x7f`@`0x180086ec1`,
+len 9@`0x180086eb5`); capture state machine **`tudorCaptureProcess fcn.18007ebc0`**;
+readiness poll **`fcn.18007f780`**; proto dispatcher **`fcn.180085090`**; PAL
+`fcn.1800680b0`.
+- FRAME_READ = 9 bytes `7f <seq u16> 0000 ffff 0003` (LE) — CONFIRMED.
+- **seq field = `word[hSensor+0xa0]`** (103; note 104 used `+0x90`): reset to 0 in
+  FRAME_ACQ builder (`0x18008714c`), `++` only after a successful read
+  (`0x180086ff7-09`), never synced to the interrupt frame index ⇒ **first read
+  seq=0** CONFIRMED.
+- **CORRECTION:** readiness poll uses proto-IOCTL **`0x69`** (not `0x6a`); generic
+  sender uses proto-IOCTL **`0x67`**. Both return/ride cached host-side data.
+- **NO on-wire command occurs between a successful FRAME_ACQ and FRAME_READ**
+  (CONFIRMED): the state machine only reads the cached host event queue
+  (`tudorEventDataGet fcn.18007fc60`) + the cached interrupt report (0x69). A Linux
+  client needs nothing on the wire between ACQ and READ — just observe frame-ready
+  (poll EP 0x83) then send 0x7f with seq 0,1,2,…
+- FRAME_FINISH (0x81) NOT in the read loop (CONFIRMED; it's separate teardown).
+  104-only SET_POWER_POLICY absent in 103 (CONFIRMED).
+
+### RECONCILED ROOT CAUSE of 0x0689 (Chunks 2+3)
+`tudorCaptureStart` (`fcn.18007e7d0`) does **pre-FRAME_ACQ arming** that pydrv
+omits, in this order:
+```
+fcn.18007fab0  (pre-acq setup)
+malloc capture ctx -> [hSensor+0xa8];  [hSensor+0xc4]=1 (capturing flag)
+[ctx+0x14]=flags; [ctx+0x18]=flags2
+fcn.18007fb30  (arm DRDY / config)          <-- likely EVENT_CONFIG / mode arm
+[hSensor+0x69]=0  (interrupt-seq baseline)
+FRAME_ACQ (0x80)
+```
+And per Chunk 3, the raw FRAME_ACQ/READ chain is reached only via the diagnostic
+IOCTL `_tudorIoctlExt` (`fcn.1800847e0`), which first loads **SensorCfg + IPL-IOTA**
+blobs (`ePlaybackTagSensorCfg`/`ePlaybackTagIplIota`). **In our on-device test the
+frame WAS ready (interrupt byte0=2) yet we got `0x0689 = SENSOR_MALFUNCTIONED`
+(illegal state), NOT `0x5b6 = FRAME_NOT_READY`.** ⇒ the sensor isn't complaining
+"too early"; it's **not in the armed capture MODE**. pydrv sends a bare
+`FRAME_ACQ` without the `fcn.18007fab0`/`fcn.18007fb30` arming (and/or the
+SensorCfg/IPL-IOTA mode load) ⇒ MALFUNCTIONED.
+- **Actionable next RE:** decode `fcn.18007fab0` and `fcn.18007fb30` (and the
+  `_tudorIoctlExt` SensorCfg/IPL-IOTA load) to get the exact command(s)/IOCTLs the
+  driver sends to arm capture **before** FRAME_ACQ, then add them to pydrv's
+  `capture_frames()` before the FRAME_ACQ send.
+- **Alt path:** replicate the production capture (`vfmUtilCaptureImage` →
+  proto-IOCTL 0x65/0x191 + finger-detect) instead of the raw diagnostic path.
 
 ## Appendix — pairing / HS-key RE landmarks (from 1b.6, main-session RE)
 Kept here so the function addresses aren't lost; the semantics + reversibility
