@@ -73,6 +73,21 @@ class SensorFrameCapturer:
         #  [0x14]=0x0c; [0x15-0x16]=0x14; [0x17]=2; [0x18]=0.
         #(pydrv previously sent a truncated 17-byte request, which left the sensor
         # un-armed and made FRAME_READ fail with status 0x0689.)
+        #Arm the frame-ready ("DRDY") event BEFORE FRAME_ACQ. RE of
+        #synaWudfBioUsb103.dll (tudorCaptureStart -> fcn.18007fb30) shows the
+        #Windows driver sends EVENT_CONFIG (0x86) with mask 0x1000 (event id 0x18)
+        #to arm frame-ready capture. Without this arming the sensor is not in the
+        #capture mode and FRAME_READ returns 0x0689 (SENSOR_MALFUNCTIONED).
+        #Exact driver wire format (little-endian): opcode + two identical 4x u32
+        #event bitmaps + u32 event count. For event id 0x18: bit 24 of word 0.
+        logging.log(tudor.LOG_PROTO, "Arming frame-ready event (EVENT_CONFIG mask 0x1000)...")
+        self.sensor.comm.send_command(
+            struct.pack("<B4I4II", tudor.Command.EVENT_CONFIG,
+                        0x01000000, 0, 0, 0,
+                        0x01000000, 0, 0, 0,
+                        1),
+            0x42)
+
         logging.log(tudor.LOG_PROTO, "Starting frame capture...")
         frame_acq = (
             struct.pack("<B", tudor.Command.FRAME_ACQ)
