@@ -177,6 +177,69 @@ cmds are TLS-encrypted so passive USBPcap won't reveal plaintext).
   104-style SET_POWER_POLICY, which is host-side anyway).
 - Precise firmware meaning of `0x0689` (sensor-side; not in DLL).
 
+## INDEPENDENT 103-BINARY RE-VALIDATION (2026-07-23) — no docs/rev.txt used
+Three `re` subagents re-derived findings from the DLLs alone (binary only), to
+guard against `rev.txt` being wrong for this device. Results:
+
+### Chunk 1 — FRAME_ACQ: CONFIRMED against 103
+- 103 addrs: builder **`fcn.180087060`**, caller `tudorCaptureStart` **`fcn.18007e7d0`**,
+  opcode-alloc `fcn.18008a9a0`, sender `fcn.18008a570`, u16/u32 field writers
+  `fcn.1800b6360`/`fcn.1800b6380` (both **identity/LE**).
+- Multi-mode (arg3=1/2/3) via caller's flags branch (`&1`,`&2`) CONFIRMED; sizes
+  17/17/25 CONFIRMED; num_frames u32 @[5-8], flags u32 @[1-4] CONFIRMED; mode-3 &
+  mode-2 exact bytes CONFIRMED byte-identical to this doc; **103≡104**.
+- New: FRAME_ACQ send has a **retry-on-status-`0xdf`(busy) loop, capped 3 tries**
+  (`0x180087330-84`). Nuance: mode-3's num_frames is caller-supplied (arg5), only
+  mode-2 forces num=1. Real enroll flags/arg5 unverified (caller reached via vtable).
+
+### Chunk 3 — 0x0689 + capture architecture: BREAKTHROUGH
+Status mapper **103 `fcn.18008bc30`** / **104 `fcn.180088750`** (logs "FW command
+reply failed with status= %d:"). Success = {0x000,0x412,0x5cc}. Selected map
+(VCS_RESULT_*; GEN_BASE=100, SENSOR_BASE=200):
+`0x401→SENSOR_BAD_CMD(0xd1), 0x404→GEN_OPERATION_DENIED(0x68), 0x405/6→GEN_BAD_PARAM(0x6f),
+0x509→MATCHER_MATCH_FAILED(0x12e), 0x5b6→SENSOR_FRAME_NOT_READY(0xda),
+0x6e0→SENSOR_CALIBRATION_FAIL(0xdc), 0x6ea→SENSOR_CAPTURE_RESET, default→SENSOR_MALFUNCTIONED(0xca)`.
+- **`0x0689` is UNMAPPED → default `0xca` = `VCS_RESULT_SENSOR_MALFUNCTIONED`.** The
+  firmware deliberately returns MALFUNCTIONED (illegal-op-in-state), **not** the
+  benign `0x5b6` "frame not ready". ⇒ our `FRAME_READ` is being rejected as an
+  illegal operation for the current sensor state.
+- **This is an image-off-sensor, HOST-matched design (NOT on-chip match).** The
+  firmware opcode vocabulary has **no ENROLL/IDENTIFY/VERIFY/MATCH** — only
+  GET_VERSION, RESET, PEEK/POKE, GET_STARTINFO, TAKE_OWNERSHIP_EX2,
+  FRAME_{READ,ACQ,FINISH,STATE_GET,STREAM}, EVENT_{CONFIG,READ}, IOTA_FIND,
+  PROVISION, GET_CERTIFICATE_EX, STORAGE_*, DB2_* (template DB), LED, etc.
+  Matching is host software (`hMatcher`, `pMatcherIface->enrollFinish`,
+  `_vfmMatchImageToTemplates`, `vfmEnrollAddImage`, QM matcher; templates stored
+  via DB2/STORAGE).
+- **Two distinct capture paths:**
+  1. **Production enroll/verify** = `vfmUtilCaptureImage` (`fcn.180059420`) driving
+     proto-IOCTL **0x65/0x191** + finger-detect (`fcn.1800609b0`,
+     "SSI_CAPTURE_STATUS_FD_DETECTED") + EVENT_CONFIG. **Does NOT use FRAME_READ.**
+  2. **Raw `FRAME_ACQ`/`FRAME_READ`** is reachable ONLY via the diagnostic/IPL
+     "playback" IOCTL **`_tudorIoctlExt` `fcn.1800847e0`** (selector 0x65 ext;
+     "_tudorIoctlExt: Invalid opCode"), which first loads SensorCfg/IPL-IOTA
+     (`ePlaybackTagSensorCfg`/`ePlaybackTagIplIota`/`ePlaybackTagFrameDim` via
+     `palTagValSetBlobDataProperty`) and runs the full
+     `tudorCaptureStart(FRAME_ACQ)`→`FRAME_STATE_GET`→`FRAME_READ`→`FRAME_FINISH`
+     sequencer. Frame-ready = proto-IOCTL **0x69**, 7-byte reply, `byte[0]==2` and
+     `byte[1]`==expected index (`[hSensor+0x69]`).
+- **Root cause of our 0x0689 (medium-high conf):** pydrv issues a bare `FRAME_ACQ`
+  then `FRAME_READ` **without** the diagnostic/IPL "playback" mode arming that
+  `_tudorIoctlExt` does (SensorCfg/IPL-IOTA load + the full sequencer). The
+  firmware refuses the raw read → MALFUNCTIONED.
+- **Strategic assessment:** host image capture IS how this sensor works, but the
+  **driver-blessed path is production proto-IOCTL 0x65/0x191 (SSI/finger-detect),
+  not raw FRAME_READ.** Two options for Linux: (a) replicate the
+  `_tudorIoctlExt` diagnostic arming (SensorCfg/IPL-IOTA setup) before
+  FRAME_ACQ/READ; (b) replicate the production 0x65/0x191 SSI capture path.
+  Either way images come out **raw** and need host-side processing/matching
+  (Windows uses a proprietary matcher module; a Linux port needs its own, e.g.
+  libfprint/NBIS). No on-chip match to lean on. `rev.txt`-derived assumptions did
+  NOT mislead the byte-level RE, but they omitted this production-vs-diagnostic
+  split and the mode-arming precondition.
+
+(Chunk 2 — FRAME_READ loop/seq detail — subagent report pending recovery.)
+
 ## Appendix — pairing / HS-key RE landmarks (from 1b.6, main-session RE)
 Kept here so the function addresses aren't lost; the semantics + reversibility
 analysis are in [`00bc-porting.md`](00bc-porting.md).
