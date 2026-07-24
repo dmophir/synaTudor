@@ -598,6 +598,31 @@ works well in opencode.** Findings (all cross-checked 103≡104):
   `pydrv/tools/`: `pair_00bc.py` (pair/init-test), `capture_pgm.py` (capture).
   Pairing data at `/etc/tudor/22eb371d62990000.pdata`.
 
+### 2026-07-23 — 1d seq-sweep result: FRAME_READ is categorically rejected
+`diag/frame_read_probe.py` (one finger press): `FRAME_ACQ` (mode-3) accepted
+(status 0x0000), a frame latched (interrupt `02000000000101`, b0=2, idx=1), then
+**all 8 `FRAME_READ` seq values 0..7 returned `0x0689`** (resp_len=2, `8906`).
+⇒ Not the seq, not the bytes, not the mode (mode-2 & mode-3 both fail): the
+sensor refuses to hand out a raw frame in the state our session reaches. This is
+a **capture-state wall** invisible to static RE.
+
+**Strategic implication:** upstream's own README says the `rev` (pure-protocol)
+branch "hit multiple dead ends" and they pivoted to **relinking the real Windows
+DLLs**. Raw `FRAME_READ` capture may be exactly such a dead end (these are
+match-on-chip sensors; the raw-image path likely needs engine-adapter/state that
+the protocol prototype doesn't reproduce). Options going forward:
+- **(A) Windows dynamic capture** (Frida on the friend's identical Win tablet) to
+  get the *exact* successful capture sequence/flags/timing (frame cmds are
+  TLS-encrypted → needs a driver hook, not passive USBPcap).
+- **(B) Pivot to the relink approach**: run the real `synaFpAdapter103.dll` +
+  `synaWudfBioUsb103.dll` under `libtudor`'s Windows-API shims so the genuine
+  engine adapter performs capture/enroll (MoC). We now know it's Augusta/103,
+  pairing+TLS work, and the DLLs are in hand — but `libtudor` shims were written
+  for the 104 DLLs and may need work for 103.
+- **(C) Reframe as match-on-chip**: drive enroll/verify on-chip via the WBDI
+  engine-adapter protocol rather than host-side image capture.
+Decision pending (see chat).
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229
