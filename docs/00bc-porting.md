@@ -33,6 +33,36 @@ landmarks) distilled from the `re`-subagent fanout, so it survives compaction.
   broken** (recoverable via Windows re-enroll). Next: **1d** — capture frames +
   reconstruct an image (IPL). See Phase 1 running log.
 
+## Next-session handoff (start here to avoid duplicate effort)
+State: pairing + TLS + secure command channel all WORK on `06cb:00bc`. The open
+problem is **image capture**. Raw `FRAME_ACQ`/`FRAME_READ` is a dead end for us
+(see `frame-capture-re.md`): fully validated + armed, it still returns
+`0x0689 (SENSOR_MALFUNCTIONED)` because it's a diagnostic/IPL-mode-gated path.
+**Next goal: the production capture path** = `vfmUtilCaptureImage`
+(`fcn.180059420`) → proto-IOCTL **0x65 / 0x191** + finger-detect
+(`fcn.1800609b0`, `SSI_CAPTURE_STATUS_FD_DETECTED`) + `EVENT_CONFIG`, then
+**host-side matching** (no on-chip match opcodes exist; Windows uses a proprietary
+matcher — a Linux port needs libfprint/NBIS-style image processing).
+
+Do NOT re-try (already ruled out on-device): raw `FRAME_READ` seq sweep 0..7 (all
+0x0689); both `FRAME_ACQ` modes (17B & 25B); `EVENT_CONFIG(0x1000)` arm alone.
+
+**Re-staging the Windows DLLs for RE** (temp copies under
+`/var/folders/kv/.../T/opencode/re-frameacq/` are ephemeral):
+- **Augusta/103 (our sensor):** `synaWudfBioUsb103.dll` **and**
+  `synaFpAdapter103.dll` (the adapter DLL — where `vfmUtilCaptureImage`/matcher
+  live; **NOT yet staged** — stage it next). From Dell EXE
+  `Synaptics-Fingerprint-Sensor-Driver_3PFJG_WIN64_6.0.18.1103_A06.EXE`
+  (`dl.dell.com/FOLDER12308597M/1/…`, SHA1 `b9941d62…`, see `libtudor/installer.sha`
+  on branch `00bc`); extract with `7zz`/`unzip` → `0/Drivers/DellAugusta-103_…_Inf/`.
+- **Tudor/104 (cross-ref):** `synaWudfBioUsb104.dll`/`synaFpAdapter104.dll` from
+  Lenovo `r19fp02w.exe` (`download.lenovo.com/pccbbs/mobiles/r19fp02w.exe`, SHA1
+  `7450e2f9…`); it's InnoSetup → `innoextract` → `code$GetExtractPath$/`.
+- RE tooling on the Mac: `r2` (radare2), `objdump`, `binwalk`, `7zz`, `innoextract`.
+- Subagent for binary RE: the **`re`** subagent (`.opencode/agent/re.md`, Opus,
+  gitignored/local) — binary-only by default; give it the DLL paths + specific
+  claims. Restart opencode after config changes.
+
 ## Hardware / environment facts
 - USB ID: `06cb:00bc`. Internal sensor "product id" (from GET_VERSION) is a
   separate ASCII value — do not confuse with the USB PID.
