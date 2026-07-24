@@ -591,3 +591,106 @@ directly over the established TLS channel with no visible per-op SAP handshake �
   exact 36B match-result offsets; 60B enroll-stat already mapped; DB2_CLEANUP/FORMAT
   bodies; whether SAP gates writes; misEnrollSessionSave blob layout; the exact
   per-image EVENT_CONFIG mask for enroll.
+
+## RESIDUAL RE RESOLVED (2026-07-24) — exact wire layouts for Phase C
+3-way `re` fanout (RES-1/2/3) pinned the byte layouts + resolved two premises.
+**All little-endian; request buffer = `[opcode:u8][body…]`.** Two corrections to the
+MOC COMMAND SPEC above are marked ⚠.
+
+### ⚠ Correction 1 — MOC enroll/verify does NOT arm FRAME_ACQ/EVENT_CONFIG
+RES-3 traced the enroll add-image path (`CEisMisEIV::EnrollmentUpdate fcn.180011050`
+→ `vfmUtilEnrollAddImage fcn.180055300` → `vfmEnrollAddImage fcn.18004bd30`) and the
+verify path and found **no `EVENT_CONFIG(0x86)`/`FRAME_ACQ(0x80)`/`EVENT_READ(0x87)`
+in the MOC path**. Those belong to the separate wake/diagnostic path. On-chip
+enroll/verify is driven **entirely** by the matcher commands `0x96`/`0x99` (+ QM
+struct); **the sensor captures + extracts on-chip when it receives the command.**
+`vfmEnrollAddImage` issues AddImage via sensor-iface vtable `[iface+0x40]` (=`0x96`
+builder `fcn.1800a4600`) and, on the final image, GetTuid via `[iface+0x48]`.
+⇒ **Phase C: do NOT arm FRAME_ACQ for enroll/verify.** Open on-device question:
+how finger-present is signalled/timed relative to the `0x96` AddImage (likely the
+command itself waits-for-finger on-chip; finger-detect events may be host-UI only).
+
+### ⚠ Correction 2 — SAP / secure-storage is NOT required for DB2
+RES-2 proved (disjoint call graph) that DB2 read/write go solely through allocator
+`fcn.1800af420` + sender `fcn.1800af510` → `call [ctx+0xa0]` (tudorSendAnyCommand),
+with **no** SAP call. `AuthenticateUserStorageOnSensor`/`SapRequest` are a separate
+WBDI/SSI secure-session (host↔service trust + enroll-commit), on a different object
+(`this+0x10`). ⇒ **A Linux driver that owns TLS can do DB2 read/write WITHOUT SAP.**
+(Residual risk only if firmware itself rejects writes outside a SAP session — the
+DLL's own code does not; verify on-device.)
+
+### Matcher requests (opcode byte at buf[0]; offsets are body = buf+1)
+- **misEnrollStart** (`fcn.1800a4120`, body 13B): `struct.pack('<B I I I B', 0x96, 1, nonce_present, nonce, 0)` — sub-op **1**@+0; nonce_present@+4; nonce@+8.
+- **misEnrollAddImage** (`fcn.1800a4600`, body 5B): `struct.pack('<B I B', 0x96, 2, 0)` — sub-op **2**@+0.
+- **misEnrollFinish/Commit** (`fcn.1800a4bf0`, body 5B): `struct.pack('<B I B', 0x96, 4, 0)` — sub-op **4**@+0.
+- **misIdentifyMatchCmd** (`fcn.1800a4f20`, body = n*16 + blob_len + 0xd):
+  body[+0]=u32 **1** (constant); [+4]=u32 list_len(=n*16) OR [+8]=u32 blob_len; payload@+0xc.
+  - template path: `pack('<B I I I', 0x99, 1, n*16, 0) + n×16-byte refs`
+  - blob path:     `pack('<B I I I', 0x99, 1, 0, blob_len) + blob`
+  - 16-byte template ref = opaque TUID (= DB2 object UID). `0x642` is a transport
+    descriptor tag (not in the body). secureBio nonce fetched before the 0x99 send.
+
+### Matcher replies (reply base skips 2-byte status; QM = reply+2; size u32 @ QM+0x10)
+- **60-byte ENROLL stat** (0x96 AddImage; validated `QM+0x10==0x3c`; copied from QM+0x14).
+  Field offsets **within the 60-byte stat** (⚠ corrects the earlier tentative map):
+  `+0x02` **u8 progress%** (completion gate: `byte[stat+2]==0x64`==100);
+  `+0x14` u32 **redundant**; `+0x18` u32 **quality**; `+0x1c` u32 **templateCount**;
+  `+0x24` u32 **rejected**; `+0x28` u16 **finalQuality**; `+0x30` u32 completion flag.
+  Log: "Enroll stats: progress-%d, templateCount-%d, redundant-%d quality-%d rejected-%d".
+  Status codes: 305(0x131)=more images; 304(0x130)=failed/fixed-pattern (limit 4).
+- **36-byte MATCH result** (0x99; validated `QM+0x10==0x24`; copied from QM+0x1c).
+  **FIXED offsets (not tag-value):** `+0x00` u32 **matchScore**; `+0x14` u32
+  **templateUpdate** flag; `+0x1c` u32 **updatedTemplateRef/index**. (matchIndex/
+  matchStrength seen in host logs are host-computed, not direct wire fields.)
+  **Threshold = host session `ctx+0x2c`; MATCH iff `score > threshold` (strict).**
+
+### DB2 storage (framing: allocator `fcn.1800af420` sets buf[0]=opcode; resp fields @ resp+2)
+- **GET_DB_INFO 0x9e** (`fcn.1800ad140`): req `pack('<BB',0x9e,1)`; resp 0x28B — u16s:
+  +0 dummy, +2 verMaj, +4 verMin, +6 pversion(u32), +0xa UOP_len, +0xc TOP_len,
+  +0xe POP_len, +0x10 tmplSlotSz, +0x12 paySlotSz, **+0x14 NumCurrentUsers**,
+  +0x16 NumDeletedUsers, +0x18 NumAvailUserSlots, **+0x1a NumCurrentTemplates**,
+  +0x1c NumDeletedTemplates, +0x1e NumAvailTmplSlots, **+0x20 NumCurrentPayloads**,
+  +0x22 NumDeletedPayloads, +0x24 NumAvailPaySlots. (Auto-fires CLEANUP if
+  NumDeletedUsers!=0 && NumAvailUserSlots==0.)
+- **GET_OBJECT_LIST 0x9f**: req = `op + type(u8) + 3pad + 16-byte UID key`; resp =
+  status + count×16-byte UID entries (count from GET_DB_INFO). Template entries have
+  a leading `u32 type == 0x20` (filter in RetrieveTemplatesFromFlash).
+- **GET_OBJECT_INFO 0xa0**: req like LIST; resp payload size @ objinfo+0x2e.
+- **GET_OBJECT_DATA 0xa1**: req = `op+type+3pad+16B UID`; resp: `datalen u32 @+4`,
+  payload @+8 (the template blob read).
+- **WRITE_OBJECT 0xa2** (`fcn.1800ae2c0`, body = 0x24 + payload_len): type2/3 =
+  `pack('<BB',type,1) + 2pad + uid16 + 8pad + pack('<I',payload_len) + payload`;
+  type1 = `pack('<BB',type,1) + 2pad + id4`. Response: 16-byte object handle/UID @
+  resp+0x04 (echoed to caller). **UID is host-supplied/echoed** (new-template UID is
+  minted upstream in the enroll/QM path, NOT by this builder).
+- **DELETE_OBJECT 0xa3** (`fcn.1800aea50`, body 0x14): `pack('<BB',0xa3,type)+2pad+uid16`;
+  resp u16 deleted_objects @+2.
+- **CLEANUP 0xa4** (`fcn.1800aee80`, body 1): `pack('<BB',0xa4,1)`; resp (8B) u16
+  erased_slots@+2, u32 new_partition_version@+4.
+- **FORMAT 0xa5** (`fcn.1800aec80`, body 0xc): `pack('<B',0xa5)+b'\x01'+11pad`; resp
+  u32 new_partition_version@+4. (Destructive — on the NEVER-run list.)
+
+### Auth session + template persistence
+- **misAuthStart** allocs 0xA8 ctx: `+0x00` session id, `+0x2c` **threshold**,
+  `+0x40/+0x48` matched-TUID size/ptr, `+0x50/+0x58` payload, `+0x60/+0x68` signed
+  result, `+0x90` match time.
+- **misAuthGetResult** (`fcn.1800a3270`) sub-ops: **0x2711**→matched TUID (ctx+0x40/48),
+  **0x2712**→payload (ctx+0x50/58), **0x2713**→signed result (ctx+0x60/68). Buffer-size
+  negotiation: if caller capacity < needed → write needed + return status 0x74.
+- **misEnrollSessionSave/Restore are UNIMPLEMENTED STUBS in 103** (return 0x71). ⇒
+  **persistence = the DB2 template object, not a session blob.**
+- **Template blob is built HOST-SIDE**: `vfmGetTemplate fcn.18004c780` assembles a
+  `pEncryptedTemplate` from the enroll ctx (on-chip tuid16 + 60-byte QM descriptor +
+  user/sub id + a crypto wrap), then `tudorCmdWriteObject` → **WRITE_OBJECT 0xa2**
+  (object type tag 0x20). ⚠ **Phase C complication:** the exact template
+  encryption/wrapping (`pEncryptedTemplate`) is NOT fully decoded (host-key wrap of
+  {tuid16 + QM descriptor + ids}) — needs its own RE or on-device probing before
+  templates can round-trip. `RetrieveTemplatesFromFlash` reads them back via 0xa1.
+
+### Still-open (on-device or further RE)
+- Finger-present trigger/timing vs the `0x96` AddImage (likely command-triggered
+  on-chip capture; confirm on device).
+- The `pEncryptedTemplate` wrap/crypto used by WRITE_OBJECT 0xa2.
+- Whether firmware accepts DB2 writes without a SAP session (expected yes).
+- Exact interior of the 16-byte TUID; unused 36B/60B stat dwords.
+- 104 layouts differ (divergent generation) — not needed for `00bc`.
