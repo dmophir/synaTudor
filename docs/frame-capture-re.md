@@ -277,12 +277,33 @@ frame WAS ready (interrupt byte0=2) yet we got `0x0689 = SENSOR_MALFUNCTIONED`
 "too early"; it's **not in the armed capture MODE**. pydrv sends a bare
 `FRAME_ACQ` without the `fcn.18007fab0`/`fcn.18007fb30` arming (and/or the
 SensorCfg/IPL-IOTA mode load) ⇒ MALFUNCTIONED.
-- **Actionable next RE:** decode `fcn.18007fab0` and `fcn.18007fb30` (and the
-  `_tudorIoctlExt` SensorCfg/IPL-IOTA load) to get the exact command(s)/IOCTLs the
-  driver sends to arm capture **before** FRAME_ACQ, then add them to pydrv's
-  `capture_frames()` before the FRAME_ACQ send.
 - **Alt path:** replicate the production capture (`vfmUtilCaptureImage` →
   proto-IOCTL 0x65/0x191 + finger-detect) instead of the raw diagnostic path.
+
+### ARMING SOLVED (2026-07-23) — EVENT_CONFIG(0x86) mask 0x1000 before FRAME_ACQ
+Arming-RE subagent decoded the pre-FRAME_ACQ steps in `tudorCaptureStart`
+(103 `fcn.18007e7d0`/`fcn.18007e6a0`):
+- `fcn.18007fab0` (pre-acq): **host-side only** — frees the old capture ctx. No wire.
+- `fcn.18007fb30` ("arm/DRDY"): **THE arming command** — calls
+  `fcn.180080720(hSensor, 0x1000)` → builds & sends **`EVENT_CONFIG (0x86)` with
+  mask `0x1000` → event id `0x18` (frame-ready/DRDY)**. Logs "Capture started".
+- `_tudorIoctlExt` SensorCfg/IPL-IOTA "playback" load: **host-side only** (stores
+  blobs via `palTagValSetBlobDataProperty`); no wire command.
+So the ONLY missing on-wire step vs pydrv is the frame-ready `EVENT_CONFIG`.
+- **EVENT_CONFIG(0x86) wire format** (37 = 0x25 bytes, LE; verified in
+  `fcn.180080c30`/`fcn.180087820`): opcode + **two identical 4×u32 event bitmaps**
+  (for event id `b`: word `b>>7`, bit `1<<(b&0x1f)`) + **u32 event count**. For
+  mask 0x1000 (id 0x18 → word0 bit24): the 37 bytes are
+  `86 | 01000000 00000000 00000000 00000000 | 01000000 00000000 00000000 00000000 | 01000000`.
+  (Mask→id table: 0x100→2,0x80→1,0x04→6,0x08→7,0x10→8,0x20→9,0x01→3,0x02→4,
+  0x40→5,**0x1000→0x18**.) EVENT_CONFIG **replaces** the mask (not additive), so
+  the driver switches to frame-ready for the capture window.
+- **Note pydrv's `set_event_mask` encoding differs** (it packs the mask into all
+  8 u32 words + trailing `0`, vs the driver's 4-word bitmap ×2 + count). It works
+  for finger masks empirically, but the capture fix sends the **exact driver
+  bytes** to be safe (`capture.py` `capture_frames`, committed `f092167`).
+- **Fix applied:** `capture_frames()` now sends `EVENT_CONFIG(0x1000)` immediately
+  before `FRAME_ACQ`. Pending on-device retest.
 
 ## Appendix — pairing / HS-key RE landmarks (from 1b.6, main-session RE)
 Kept here so the function addresses aren't lost; the semantics + reversibility
