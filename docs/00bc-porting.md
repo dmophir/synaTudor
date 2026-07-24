@@ -7,6 +7,10 @@ the agreed strategy so a fresh session can get up to speed fast.
 
 Last updated: 2026-07-23
 
+Companion doc: [`frame-capture-re.md`](frame-capture-re.md) — detailed frame-capture
+protocol RE (function addresses, byte layouts, ioctl/status tables, HS-key
+landmarks) distilled from the `re`-subagent fanout, so it survives compaction.
+
 ## TL;DR / current status
 - Sensor: `06cb:00bc` (Synaptics), on a Dell Latitude 7210 2-in-1. Works on
   Windows via Dell's Synaptics driver; unsupported on Linux.
