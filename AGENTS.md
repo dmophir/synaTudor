@@ -26,10 +26,17 @@ independently-validated binary RE of the capture protocol). Keep both up to date
   `WRITE_OBJECT 0xa2`. **Corrected pydrv DB2 bug: `DB2_CLEANUP` is `0xa4` (pydrv
   wrongly aliases it to `0xa3`); `DB2_WRITE_OBJECT 0xa2` is missing.** Full spec:
   `docs/frame-capture-re.md` → "MOC COMMAND SPEC (2026-07-24)".
-- **NEXT — Phase C (gated, awaiting go):** implement the `mis*` 0x96/0x99 + QM
-  struct + enroll/verify state machines + DB2 template store in `pydrv/`, then
-  validate on-device (enroll a finger, verify match). Deferred image-capture /
-  Match-On-Host path is the fallback only if MOC stalls.
+- **RESIDUAL RE DONE (2026-07-24):** exact QM/DB2 wire layouts pinned + two
+  corrections — MOC enroll/verify do **NOT** arm `FRAME_ACQ`/`EVENT_CONFIG` (sensor
+  captures on-chip on the `0x96`/`0x99` cmd); **SAP not needed** for DB2. See
+  `docs/frame-capture-re.md` → "RESIDUAL RE RESOLVED" + updated "PHASE C PLAN".
+- **NEXT — Phase C (gated, awaiting go):** ordered: (1) fix `comm.py` DB2 enum;
+  (2) DB2 read path (`0x9e/0x9f/0xa0/0xa1`, filter type `0x20`) — safe on-device
+  validation; (3) `mis*` 0x96/0x99 builders + QM parse; (4) enroll state machine
+  (loop AddImage to progress==100); (5) template persist via `WRITE_OBJECT 0xa2`;
+  (6) verify/identify. **⚠ Phase C BLOCKER:** the stored template is a host-built
+  `pEncryptedTemplate` (crypto wrap NOT yet decoded) — templates may not round-trip
+  until that's RE'd/replicated. Deferred Match-On-Host path is the fallback if MOC stalls.
 - **Binary RE:** use the local **`re`** subagent (`.opencode/agent/re.md`, Opus,
   gitignored). Both adapter DLLs (`synaFpAdapter103/104.dll`) + USB DLLs + r2 seed
   dumps are now staged in the sandbox `re-frameacq/`.

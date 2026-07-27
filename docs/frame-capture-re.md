@@ -580,17 +580,43 @@ directly over the established TLS channel with no visible per-op SAP handshake �
 **reads likely work without SAP; writes MAY require it.** Top empirical unknown.
 `[MOC-3, medium]`
 
-### pydrv gaps to close (Phase C)
-- pydrv has **no** enroll/verify/identify/matcher code. Add the `mis*` 0x96/0x99
-  command builders + QM struct (sub-op selector, 60B/36B) + the enroll/verify state
-  machines + capture-arm reuse.
-- Fix `comm.py` DB2 enum: add `DB2_WRITE_OBJECT=0xa2`; fix `DB2_CLEANUP=0xa4` (it is
-  wrongly `0xa3`, aliasing DELETE_OBJ). Add DB2 request/response (list/info/data/write).
-- Template object type tag = `0x20`.
-- Residual UNKNOWNs to pin during impl (likely need on-device or one more RE pass):
-  exact 36B match-result offsets; 60B enroll-stat already mapped; DB2_CLEANUP/FORMAT
-  bodies; whether SAP gates writes; misEnrollSessionSave blob layout; the exact
-  per-image EVENT_CONFIG mask for enroll.
+### PHASE C PLAN (updated 2026-07-24 after RES-1/2/3 — supersedes the stale gap list)
+Exact wire layouts are in "RESIDUAL RE RESOLVED" below. Corrected understanding:
+- **No frame-capture arm.** Enroll/verify do NOT send `EVENT_CONFIG(0x86)`/
+  `FRAME_ACQ(0x80)`/`FRAME_READ`/`EVENT_READ(0x87)`. The sensor captures + extracts
+  on-chip on the `0x96`/`0x99` matcher command. (⚠ removed the earlier
+  "capture-arm reuse" item — it was wrong.)
+- **No SAP needed** for DB2 read/write over the existing TLS channel.
+- `misEnrollSessionSave/Restore` are 103 stubs → persistence = the DB2 template
+  object, not a session blob.
+
+Recommended ordered steps (safe → risky):
+1. **comm.py DB2 enum fix (safe):** add `DB2_WRITE_OBJECT=0xa2`; fix
+   `DB2_CLEANUP=0xa4` (currently wrongly `0xa3`, aliasing `DELETE_OBJ`). Keep
+   `FORMAT 0xa5` on the NEVER-run list (destructive).
+2. **DB2 read path (read-only, on-device validation):** implement `GET_DB_INFO 0x9e`
+   → `GET_OBJECT_LIST 0x9f` (filter object type `0x20`) → `GET_OBJECT_INFO 0xa0` /
+   `GET_OBJECT_DATA 0xa1`. Run on the tablet to enumerate existing template objects.
+   Zero risk; validates the DB2 layer + our layouts before any write/enroll.
+3. **Matcher command layer:** `mis*` builders — `0x96` (sub-op 1/2/4) and `0x99`
+   (const1 + list_len/blob_len + payload), QM reply parse (60B enroll stat / 36B
+   match result), over the existing TLS `send_command`.
+4. **Enroll state machine:** misEnrollStart → loop misEnrollAddImage until stat
+   `progress(u8@+2)==100` (handle 305=more/304=fail) → misEnrollFinish. NO FRAME_ACQ.
+5. **Template persist:** WRITE_OBJECT `0xa2` (type `0x20`). ⚠ **BLOCKER to resolve
+   first:** the stored blob is a host-built `pEncryptedTemplate` (tuid16 + 60B QM
+   descriptor + user/sub-id + a crypto wrap) whose wrapping is NOT yet decoded —
+   templates may not round-trip until we RE/replicate it, or find a raw-store path.
+6. **Verify/identify:** load templates (step 2) → SetTemplateList → misAuthStart →
+   `misIdentifyMatchCmd 0x99` → parse 36B result → match iff `score > threshold`
+   (host-chosen) → optional misAuthUpdateTemplate + WRITE_OBJECT rewrite.
+
+Genuinely-open items (resolve on-device / dedicated RE during Phase C):
+- **`pEncryptedTemplate` wrap/crypto** (step 5 blocker) — the main risk.
+- Finger-present trigger/timing vs the `0x96` AddImage (likely command-triggered
+  on-chip; the finger-detect EVENT path may still be needed for host UI/sync).
+- Interior of the 16-byte TUID; unused 36B/60B stat dwords; whether firmware ever
+  rejects DB2 writes outside a SAP session (expected: no).
 
 ## RESIDUAL RE RESOLVED (2026-07-24) — exact wire layouts for Phase C
 3-way `re` fanout (RES-1/2/3) pinned the byte layouts + resolved two premises.
