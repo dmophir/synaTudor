@@ -754,3 +754,33 @@ diag probes `db2_probe.py`, `enroll_probe.py`. Validated live on `06cb:00bc` fw 
   involve crypto) vs Windows/Frida dynamic capture of a real enroll (blocked by
   topology: Windows enroll broken on this tablet) vs reconsider. This is the
   "static-first, Frida-if-stuck" fork.
+
+### SAP RE (2026-07-24) — root cause CONFIRMED; static wall reached
+Focused `re` pass on `AuthenticateUserStorageOnSensor`/`SapRequest`:
+- **ROOT CAUSE CONFIRMED:** `vfmEnrollAddImage` (fcn.18004bd30) hard-gates on an
+  on-chip **auth session**: `"Auth session is not established."` (@0x180141cd8) →
+  returns `0x6f` when `[ctx+0x10]==0`. Windows NEVER sends `0x96/2` cold; our sending
+  it without the session is what faults the sensor. The session is populated by
+  `CEisMisEIV::AuthenticateUserStorageOnSensor` (fcn.18000fd90), gated in
+  `EnrollmentUpdate` (fcn.180010f10) by `[rbx+0xc8]!=0 && [rbx+0xcc]==0` → run **once**
+  per fresh enroll, order **Auth → EnrollPrep → AddImage loop**.
+- **SAP op sequence** (fcn.18000fd90): `vfmUtilSessionGetDeviceHandle` →
+  `vfmSetParamBlob(id=0x6a, <SAP req>)` → `vfmUtilAuthImage` (loops SapRequest
+  challenge/response, status `0x74`=continue / `0x76`=answer-challenge / `0`=done) →
+  `vfmGetParamBlob(id=0xcb, 32B)` + `vfmGetParamBlob(id=0xc9, 2048B)`. secureBio nonce
+  = **8 bytes**, fetched via SSI vtable `[ssi+0x50]` (edx=8); nonce size set via
+  `misSetParameter` id `0x15`.
+- **NO extra host crypto** (HIGH conf): all CryptoAPI stays in the TLS/pairing region
+  (0x18007xxxx), unreachable from the SAP path. SAP is opaque challenge/response
+  relayed over the **existing TLS**; any signing/derivation is ON-CHIP. ⇒ no host
+  key to replicate — feasibility-wise the good case.
+- **STATIC WALL (the blocker):** the literal VCSFW wire opcodes + palTagVal byte
+  layouts for the SAP send, the nonce fetch, and the `vfmGetParamBlob` reads are
+  **runtime storage-vtable indirect dispatches** (`[0x18015aed0]+0x18`,
+  `[ssi+0x50]`; vtable populated by constructor fcn.18001be60) — **NOT statically
+  resolvable**. The challenge/response payload is firmware-defined/opaque.
+- **⇒ Two opaque secure pieces now block MOC**: (1) this SAP session (enroll+verify),
+  (2) the `pEncryptedTemplate` wrap (persistence). Both realistically need a **Windows
+  TLS-decrypted dynamic capture** (Frida hooking the plaintext command buffer) to
+  resolve — the sanctioned "if stuck" fallback. Topology caveat unchanged (Windows
+  enroll broken on this tablet since Linux took pairing).
