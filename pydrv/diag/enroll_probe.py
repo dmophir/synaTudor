@@ -1,21 +1,21 @@
-"""Phase C3 diagnostic: on-chip ENROLL + auto-persist check (WRITES sensor state).
+"""Phase C3 diagnostic (v2): on-chip ENROLL with per-image FRAME_ACQ arm.
 
-Drives the MOC enroll state machine over the established TLS channel:
-  enroll_start (0x96/1) -> loop[ wait FINGER_PRESS -> add_image (0x96/2) -> read
-  60-byte stat ] until progress==100 -> enroll_finish (0x96/4).
+Correction after v1 crashed the sensor: misEnrollAddImage (0x96/2) does NOT capture;
+it consumes a frame the sensor already latched on-chip. RE of the production capture
+(vfmUtilCaptureImage -> tudorCaptureStart) shows the arm is EVENT_CONFIG(0x86, DRDY
+bit24) + FRAME_ACQ(0x80, mode3), then wait frame-ready on the interrupt EP; NO
+FRAME_READ(0x7f). Those exact arm bytes are the ones capture.py already uses and the
+sensor accepts. So per image we: arm -> wait latched frame -> misEnrollAddImage(0x96/2).
 
-Then re-lists DB2 templates (category 2) before/after to answer the KEY question:
-does the sensor AUTO-PERSIST the enrolled template to flash (count 0 -> 1), or must
-the host WRITE_OBJECT it (the pEncryptedTemplate branch)?
+Then re-list DB2 templates (cat 2) before/after -> auto-persist verdict.
 
-This creates an on-chip template (reversible later via DB2_DELETE_OBJ 0xa3). It needs
-the user to physically press/lift a finger on the tablet sensor several times.
-
-Usage (root, from pydrv/, user at the sensor): python diag/enroll_probe.py
+Creates an on-chip template (reversible via DB2_DELETE_OBJ 0xa3). Needs the user to
+press/lift a finger several times. Usage (root, from pydrv/): python diag/enroll_probe.py
 """
 import os
 import sys
 import time
+import array
 import struct
 import logging
 import traceback
@@ -25,13 +25,38 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import usb.core
 import tudor
 from tudor.comm import USBCommunication, LogCommunicationProxy, SUCCESS_STATUS
-from tudor.sensor import (Sensor, SensorPairingData, SensorDB2, SensorMatcher,
-                          SensorEventType, DB2_CAT_TEMPLATE)
+from tudor.sensor import Sensor, SensorPairingData, SensorDB2, SensorMatcher, DB2_CAT_TEMPLATE
 
 PID = 0x00BC
 PDATA = "/etc/tudor/22eb371d62990000.pdata"
 OUT = "/root/synatudor/phaseC/enroll"
 MAX_IMAGES = 25
+
+# Validated arm bytes (from capture.py, accepted by the sensor):
+EVENT_CONFIG_DRDY = struct.pack("<B4I4II", tudor.Command.EVENT_CONFIG,
+                                0x01000000, 0, 0, 0, 0x01000000, 0, 0, 0, 1)
+FRAME_ACQ_MODE3 = (struct.pack("<B", tudor.Command.FRAME_ACQ) + struct.pack("<I", 1) + struct.pack("<I", 1)
+                   + bytes([0x01, 0x00, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00,
+                            0x01, 0x00, 0x00, 0x0c, 0x14, 0x00, 0x02, 0x00]))
+
+
+def arm_and_wait_frame(comm, raw, budget_s=25):
+    """Arm a single on-chip frame capture and wait (bounded) until it latches on a
+    finger press. Reads the interrupt EP directly with a 1s timeout so a no-press
+    can't hang. Returns the interrupt report on success, or None on timeout."""
+    comm.send_command(EVENT_CONFIG_DRDY, 0x42)
+    comm.send_command(FRAME_ACQ_MODE3, 2)
+    deadline = time.time() + budget_s
+    while time.time() < deadline:
+        buf = array.array('B', [0] * 8)
+        try:
+            n = raw.intr_ep.read(buf, 1000)
+        except usb.core.USBTimeoutError:
+            continue
+        ev = bytes(buf[:n])
+        if len(ev) >= 6 and ev[0] == 2 and (ev[5] & 0x7) != 0:
+            return ev
+    return None
 
 
 def snapshot_templates(db2):
@@ -70,22 +95,27 @@ def main():
         matcher.enroll_start(nonce_present=0, nonce=0)
 
         completed = False
+        total_deadline = time.time() + 200
         for i in range(MAX_IMAGES):
-            print(">>> image %d/%d: PRESS and HOLD your finger on the sensor..." % (i + 1, MAX_IMAGES))
+            remaining = total_deadline - time.time()
+            if remaining < 5:
+                print(">>> global time budget exhausted"); break
+            print(">>> image %d/%d: PRESS your finger (arming frame)..." % (i + 1, MAX_IMAGES))
             try:
-                s.event_handler.wait_for_event([SensorEventType.FINGER_PRESS])
-            except KeyboardInterrupt:
-                print("interrupted while waiting for press"); break
+                ev = arm_and_wait_frame(comm, raw, budget_s=min(90, remaining))
+            except tudor.CommandFailedException as e:
+                print("    arm FAILED status=0x%04x" % e.status); break
+            if ev is None:
+                print("    no frame latched (timed out waiting for press)"); break
+            print("    frame latched: %s" % ev.hex())
 
             try:
                 stat = matcher.enroll_add_image(timeout=8000)
                 print("    %r" % stat)
-            except usb.core.USBTimeoutError:
-                print("    add_image TIMED OUT (no reply) — add_image may not be a blocking/self-capture cmd")
-                break
+            except usb.core.USBError as e:
+                print("    add_image USB error (sensor reset?): %r" % e); break
             except tudor.CommandFailedException as e:
                 print("    add_image FAILED status=0x%04x" % e.status)
-                # 0x131(305)=more images (continue), 0x130(304)=fail
                 if e.status == 0x130:
                     print("    -> enroll failed (fixed-pattern / bad)"); break
                 stat = None
@@ -93,15 +123,9 @@ def main():
             if stat is not None and stat.complete:
                 print("    ENROLL COMPLETE (progress=100, templateCount=%d)" % stat.template_count)
                 completed = True
-
-            print(">>> lift your finger...")
-            try:
-                s.event_handler.wait_for_event([SensorEventType.FINGER_REMOVE])
-            except KeyboardInterrupt:
-                pass
-            if completed:
                 break
-            time.sleep(0.3)
+            print(">>> lift your finger...")
+            time.sleep(1.5)
 
         print(">>> enroll_finish")
         try:
@@ -109,6 +133,12 @@ def main():
             print("    finish resp head=%s" % fin[:16].hex())
         except Exception as e:
             print("    enroll_finish: %r" % e)
+
+        # best-effort end the capture session
+        try:
+            comm.send_command(struct.pack("<B", tudor.Command.FRAME_FINISH), 2)
+        except Exception:
+            pass
 
         after_count, after_uids = snapshot_templates(db2)
         print(">>> templates AFTER enroll: count=%d uids=%s" % (after_count, after_uids))

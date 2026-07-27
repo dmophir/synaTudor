@@ -720,3 +720,37 @@ DLL's own code does not; verify on-device.)
 - Whether firmware accepts DB2 writes without a SAP session (expected yes).
 - Exact interior of the 16-byte TUID; unused 36B/60B stat dwords.
 - 104 layouts differ (divergent generation) — not needed for `00bc`.
+
+## PHASE C ON-DEVICE PROGRESS (2026-07-24) — enroll blocked on add_image crash
+Implemented in `pydrv` (branch `00bc-dev`): `comm.py` DB2 enum fix + MOC opcodes;
+`sensor/db2.py` (DB2 read), `sensor/moc.py` (SensorMatcher 0x96/0x99 + QM parse);
+diag probes `db2_probe.py`, `enroll_probe.py`. Validated live on `06cb:00bc` fw 10.1:
+- **DB2 read WORKS.** `GET_DB_INFO` → 0 users/0 templates/0 payloads (DB empty; 11
+  template slots, slot size 48). `GET_OBJECT_LIST` framing = `status(2) + u16 count +
+  count×16B UID`. Layouts confirmed. **SAP not needed for DB2 reads** (as predicted).
+- **`misEnrollStart` (0x96/1, 13B `96 01 00…00`) is ACCEPTED** (reply `000000000000`).
+- **Frame capture ARMING WORKS.** `EVENT_CONFIG(0x86, DRDY bit24)` + `FRAME_ACQ(0x80,
+  mode3)` (the exact `capture.py` bytes) → status 0, and a finger press latches a
+  frame on-chip (interrupt report `02 00 00 00 00 01 00`, ev[0]=2, frame idx 1).
+- **BLOCKER: `misEnrollAddImage` (0x96/2, `96 02 00 00 00`) CRASHES/RESETS the sensor**
+  every time (USB disconnect → `GET_VERSION 0x0315`), **whether or not a frame is
+  armed/latched**. The request bytes are confirmed correct by reading the builder
+  `fcn.1800a4600` disasm directly (opcode + u32 sub-op=2; arg2 is a host-side OUT
+  buffer for the returned 16B TUID, not sent; reply parsed as 60B stat at reply+0x16).
+  Same opcode/send path as the working `enroll_start`, so it is a **STATE** problem,
+  not a format bug.
+- **Leading hypothesis:** the one WIRE step Windows performs during enroll that we
+  skip is **`CEisMisEIV::AuthenticateUserStorageOnSensor` (SAP)** — resolved as the
+  `[rax+0x108]` virtual in `EnrollmentUpdate` (fcn.180010f10), a one-time
+  (flag-gated) call BEFORE the first `misEnrollAddImage`. The on-chip matcher likely
+  requires a SAP-authenticated secure session before add-image. SAP uses `SapRequest`
+  (fcn.180012510→…) on the SSI object (`this+0x10`) with a secureBio nonce +
+  challenge/response state machine (status bytes 0x74/0x76); its exact wire opcode is
+  **UNDECODED**. (Note this refines "Correction 2": SAP is not needed for DB2, but
+  appears required for the MATCHER/enroll.)
+- **Recovery:** a crashed add_image leaves the sensor stuck (`0x0315`); clear with USB
+  `dev.reset()` + **~45s** idle (30s was sometimes insufficient after a matcher crash).
+- **Open decision (see chat):** RE+implement SAP handshake (partially decoded, may
+  involve crypto) vs Windows/Frida dynamic capture of a real enroll (blocked by
+  topology: Windows enroll broken on this tablet) vs reconsider. This is the
+  "static-first, Frida-if-stuck" fork.
