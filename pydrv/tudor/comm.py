@@ -40,12 +40,15 @@ class Command:
     FRAME_STREAM = 0x8b
     READ_IOTA = 0x8e
     PAIR = 0x93
+    MATCHER_ENROLL = 0x96
+    MATCHER_IDENTIFY = 0x99
     DB2_GET_DB_INFO = 0x9e
     DB2_GET_OBJ_LIST = 0x9f
     DB2_GET_OBJ_INFO = 0xa0
     DB2_GET_OBJ_DATA = 0xa1
+    DB2_WRITE_OBJECT = 0xa2
     DB2_DELETE_OBJ = 0xa3
-    DB2_CLEANUP = 0xa3
+    DB2_CLEANUP = 0xa4
     DB2_FORMAT = 0xa5
 
 class CommandFailedException(Exception):
