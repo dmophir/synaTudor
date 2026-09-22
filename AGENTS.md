@@ -40,9 +40,18 @@ independently-validated binary RE of the capture protocol). Keep both up to date
   `add_image 0x96/2`→82B stat, progress@stat+2 to 100] → commit(`0x96/3`, TUID+userid)
   → end(`0x96/4`); verify = capture-arm + `0x99` identify (177B reply w/ matched TUID
   + score). Full byte templates: `docs/frame-capture-re.md` → "WINDOWS DYNAMIC CAPTURE".
-- **NEXT — Phase D5 (implement + validate):** rework `pydrv` enroll/verify to the
-  captured recipe (17B FRAME_ACQ + `0x39` config), validate on our sensor with finger
-  presses. Open: whether the 4 static `0x39` bodies are Augusta-generic or per-sensor.
+- **ENROLL WORKS ON LINUX (2026-09-22):** on-chip enrollment validated end-to-end on
+  `06cb:00bc` via `pydrv`. Per-image recipe = wait FINGER_PRESS → `0x39`/LED_EX2 cfg →
+  arm frame event (EVENT10/bit24) + `FRAME_ACQ` 17B → wait frame-ready → `0x39` →
+  `FRAME_FINISH` → `add_image 0x96/2`; progress 12→100 over ~10 presses → `commit
+  0x96/3` (TUID) → `end 0x96/4`; template persists on-chip (DB2 count 0→1). The
+  friend's captured `0x39` body is **Augusta-generic** (worked on our sensor); **no
+  pEncryptedTemplate needed.** Code: `pydrv/tudor/sensor/moc.py`
+  (`SensorMatcher.enroll_loop`/`capture_one_frame`/`enroll_commit`); probes
+  `diag/enroll_probe.py` + `diag/event_diag.py`.
+- **NEXT — Phase D5.4 (verify):** `0x99` identify-against-all (`99 01 00…`, nTemplates=0)
+  → 177B reply w/ matched TUID + 36B QM result (score). Match enrolled finger, reject
+  impostor; pick a score threshold. Minor: DB2 template list parse (count=1 but empty uids).
 - **Binary RE:** use the local **`re`** subagent (`.opencode/agent/re.md`, Opus,
   gitignored). Both adapter DLLs (`synaFpAdapter103/104.dll`) + USB DLLs + r2 seed
   dumps are now staged in the sandbox `re-frameacq/`.

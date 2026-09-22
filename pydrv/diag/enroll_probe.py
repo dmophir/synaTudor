@@ -1,23 +1,21 @@
-"""Phase C3 diagnostic (v2): on-chip ENROLL with per-image FRAME_ACQ arm.
+"""Phase D5 diagnostic: on-chip ENROLL via the captured Windows recipe.
 
-Correction after v1 crashed the sensor: misEnrollAddImage (0x96/2) does NOT capture;
-it consumes a frame the sensor already latched on-chip. RE of the production capture
-(vfmUtilCaptureImage -> tudorCaptureStart) shows the arm is EVENT_CONFIG(0x86, DRDY
-bit24) + FRAME_ACQ(0x80, mode3), then wait frame-ready on the interrupt EP; NO
-FRAME_READ(0x7f). Those exact arm bytes are the ones capture.py already uses and the
-sensor accepts. So per image we: arm -> wait latched frame -> misEnrollAddImage(0x96/2).
-
-Then re-list DB2 templates (cat 2) before/after -> auto-persist verdict.
+Per-image recipe (from wincapture ground truth): LED_EX2 config (0x39) -> EVENT_CONFIG
+frame-arm -> FRAME_ACQ (17B production) -> wait finger-press frame latch -> LED_EX2 ->
+FRAME_FINISH -> add_image (0x96/2). Loop to progress==100, then commit (0x96/3) + end
+(0x96/4). This replaces the earlier attempt that crashed (it lacked the 0x39 config and
+used the 25B diagnostic FRAME_ACQ).
 
 Creates an on-chip template (reversible via DB2_DELETE_OBJ 0xa3). Needs the user to
-press/lift a finger several times. Usage (root, from pydrv/): python diag/enroll_probe.py
+press/lift a finger several times. Usage (root, from pydrv/):
+  python3 -u diag/enroll_probe.py [--no-commit]
 """
 import os
 import sys
 import time
-import array
 import struct
 import logging
+import argparse
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,32 +29,7 @@ PID = 0x00BC
 PDATA = "/etc/tudor/22eb371d62990000.pdata"
 OUT = "/root/synatudor/phaseC/enroll"
 MAX_IMAGES = 25
-
-# Validated arm bytes (from capture.py, accepted by the sensor):
-EVENT_CONFIG_DRDY = struct.pack("<B4I4II", tudor.Command.EVENT_CONFIG,
-                                0x01000000, 0, 0, 0, 0x01000000, 0, 0, 0, 1)
-FRAME_ACQ_MODE3 = (struct.pack("<B", tudor.Command.FRAME_ACQ) + struct.pack("<I", 1) + struct.pack("<I", 1)
-                   + bytes([0x01, 0x00, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00,
-                            0x01, 0x00, 0x00, 0x0c, 0x14, 0x00, 0x02, 0x00]))
-
-
-def arm_and_wait_frame(comm, raw, budget_s=25):
-    """Arm a single on-chip frame capture and wait (bounded) until it latches on a
-    finger press. Reads the interrupt EP directly with a 1s timeout so a no-press
-    can't hang. Returns the interrupt report on success, or None on timeout."""
-    comm.send_command(EVENT_CONFIG_DRDY, 0x42)
-    comm.send_command(FRAME_ACQ_MODE3, 2)
-    deadline = time.time() + budget_s
-    while time.time() < deadline:
-        buf = array.array('B', [0] * 8)
-        try:
-            n = raw.intr_ep.read(buf, 1000)
-        except usb.core.USBTimeoutError:
-            continue
-        ev = bytes(buf[:n])
-        if len(ev) >= 6 and ev[0] == 2 and (ev[5] & 0x7) != 0:
-            return ev
-    return None
+PER_IMAGE_BUDGET = 45
 
 
 def snapshot_templates(db2):
@@ -66,6 +39,10 @@ def snapshot_templates(db2):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--no-commit", action="store_true", help="stop after progress==100, do not commit")
+    args = ap.parse_args()
+
     os.makedirs(OUT, exist_ok=True)
     for lvl, nm in [(tudor.LOG_COMM, "COMM"), (tudor.LOG_PROTO, "PROTO"), (tudor.LOG_TLS, "TLS"),
                     (tudor.LOG_DETAIL, "DETAIL"), (tudor.LOG_INFO, "INFO"), (tudor.LOG_WARN, "WARN")]:
@@ -79,6 +56,7 @@ def main():
         print("NO_DEVICE"); return 2
     raw = USBCommunication(dev)
     comm = LogCommunicationProxy(raw)
+    s = None
     try:
         s = Sensor(comm)
         with open(PDATA, "rb") as f:
@@ -89,85 +67,48 @@ def main():
         print("init OK: fw %d.%d.%d" % (s.fw_major, s.fw_minor, s.fw_build_num))
 
         before_count, before_uids = snapshot_templates(db2)
-        print(">>> templates BEFORE enroll: count=%d uids=%s" % (before_count, before_uids))
+        print(">>> templates BEFORE: count=%d uids=%s" % (before_count, before_uids))
 
-        print(">>> enroll_start")
-        matcher.enroll_start(nonce_present=0, nonce=0)
+        def on_progress(i, stat, tuid):
+            print(">>> image %d: %r tuid=%s" % (i + 1, stat, tuid.hex() if any(tuid) else "(pending)"))
 
-        completed = False
-        total_deadline = time.time() + 200
-        for i in range(MAX_IMAGES):
-            remaining = total_deadline - time.time()
-            if remaining < 5:
-                print(">>> global time budget exhausted"); break
-            print(">>> image %d/%d: PRESS your finger (arming frame)..." % (i + 1, MAX_IMAGES))
-            try:
-                ev = arm_and_wait_frame(comm, raw, budget_s=min(90, remaining))
-            except tudor.CommandFailedException as e:
-                print("    arm FAILED status=0x%04x" % e.status); break
-            if ev is None:
-                print("    no frame latched (timed out waiting for press)"); break
-            print("    frame latched: %s" % ev.hex())
+        print(">>> ENROLL START — press and lift your finger repeatedly when prompted...")
+        print(">>> (press for image 1 now)")
+        stat, tuid = matcher.enroll_loop(max_images=MAX_IMAGES, finger_budget_s=PER_IMAGE_BUDGET, on_progress=on_progress)
+        print(">>> ENROLL LOOP COMPLETE: progress=100, tuid=%s templateCount=%d" % (tuid.hex(), stat.template_count))
 
-            try:
-                stat = matcher.enroll_add_image(timeout=8000)
-                print("    %r" % stat)
-            except usb.core.USBError as e:
-                print("    add_image USB error (sensor reset?): %r" % e); break
-            except tudor.CommandFailedException as e:
-                print("    add_image FAILED status=0x%04x" % e.status)
-                if e.status == 0x130:
-                    print("    -> enroll failed (fixed-pattern / bad)"); break
-                stat = None
-
-            if stat is not None and stat.complete:
-                print("    ENROLL COMPLETE (progress=100, templateCount=%d)" % stat.template_count)
-                completed = True
-                break
-            print(">>> lift your finger...")
-            time.sleep(1.5)
-
-        print(">>> enroll_finish")
-        try:
-            fin = matcher.enroll_finish()
-            print("    finish resp head=%s" % fin[:16].hex())
-        except Exception as e:
-            print("    enroll_finish: %r" % e)
-
-        # best-effort end the capture session
-        try:
-            comm.send_command(struct.pack("<B", tudor.Command.FRAME_FINISH), 2)
-        except Exception:
-            pass
+        if args.no_commit:
+            print(">>> --no-commit: stopping before commit (per request)")
+        else:
+            print(">>> commit (0x96/3) ..."); matcher.enroll_commit(tuid)
+            print(">>> end (0x96/4) ...");    matcher.enroll_end()
+            print(">>> commit+end OK")
 
         after_count, after_uids = snapshot_templates(db2)
-        print(">>> templates AFTER enroll: count=%d uids=%s" % (after_count, after_uids))
-        new_uids = [u for u in after_uids if u not in before_uids]
-        if after_count > before_count or new_uids:
-            print(">>> VERDICT: sensor AUTO-PERSISTED template (count %d->%d, new=%s) — no host WRITE_OBJECT needed"
-                  % (before_count, after_count, new_uids))
-            for uidhex in new_uids:
-                uid = bytes.fromhex(uidhex)
-                istatus, iinfo = db2.get_object_info(DB2_CAT_TEMPLATE, uid)
-                dstatus, ddata, _ = db2.get_object_data(DB2_CAT_TEMPLATE, uid)
-                print("    new template uid=%s info(0x%04x,len=%d) data(0x%04x,len=%d)"
-                      % (uidhex, istatus, len(iinfo), dstatus, len(ddata)))
-                if len(ddata) > 0:
-                    with open(os.path.join(OUT, "template_%s.bin" % uidhex), "wb") as f:
-                        f.write(ddata)
+        print(">>> templates AFTER: count=%d uids=%s" % (after_count, after_uids))
+        new = [u for u in after_uids if u not in before_uids]
+        if after_count > before_count or new:
+            print(">>> VERDICT: template PERSISTED on-chip (count %d->%d, new=%s)" % (before_count, after_count, new))
         else:
-            print(">>> VERDICT: NO new DB2 template (count still %d) — host WRITE_OBJECT/pEncryptedTemplate likely required (C5)"
-                  % after_count)
-
-        try:
-            s.uninitialize()
-        except Exception:
-            pass
+            print(">>> VERDICT: no new DB2 template (count still %d)" % after_count)
         return 0
+    except tudor.CommandFailedException as e:
+        print(">>> COMMAND FAILED status=0x%04x" % e.status)
+        print(traceback.format_exc())
+        return 1
     except Exception:
         print("ERR:\n%s" % traceback.format_exc())
         return 1
     finally:
+        try:
+            if s is not None and s.initialized:
+                comm.send_command(struct.pack("<B", tudor.Command.FRAME_FINISH), 2, raw=True)
+        except Exception:
+            pass
+        try:
+            if s is not None: s.uninitialize()
+        except Exception:
+            pass
         try:
             raw.close()
         except Exception as e:
