@@ -139,6 +139,8 @@ def main():
     ap.add_argument("--log", default="syna_capture.log")
     ap.add_argument("--proc", default="WUDFHost.exe",
                     help="process name that hosts the UMDF driver (default WUDFHost.exe)")
+    ap.add_argument("--seconds", type=int, default=0,
+                    help="auto-stop after N seconds (0 = run until Ctrl+C)")
     args = ap.parse_args()
 
     device = frida.get_local_device()
@@ -171,10 +173,16 @@ def main():
 
     print("\n>>> Hooks loaded. Look for a 'HOOKED mod=synaWudfBioUsb...' line above.")
     print(">>> Now: (1) remove + add a fingerprint in Windows Settings, (2) verify with it.")
-    print(">>> Press Ctrl+C when done.\n")
+    if args.seconds and args.seconds > 0:
+        print(">>> Auto-stopping after %d seconds.\n" % args.seconds)
+    else:
+        print(">>> Press Ctrl+C when done.\n")
     try:
-        while True:
-            time.sleep(1)
+        if args.seconds and args.seconds > 0:
+            time.sleep(args.seconds)
+        else:
+            while True:
+                time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:

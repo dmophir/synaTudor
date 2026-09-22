@@ -784,3 +784,69 @@ Focused `re` pass on `AuthenticateUserStorageOnSensor`/`SapRequest`:
   TLS-decrypted dynamic capture** (Frida hooking the plaintext command buffer) to
   resolve — the sanctioned "if stuck" fallback. Topology caveat unchanged (Windows
   enroll broken on this tablet since Linux took pairing).
+
+## WINDOWS DYNAMIC CAPTURE (2026-07-24) — full enroll+verify recipe (GROUND TRUTH)
+Captured a real Windows enroll + verify on an **identical Latitude 7210** (friend's,
+Windows) by Frida-hooking the plaintext VCSFW transceiver `fcn.18008a570` (RVA
+`0x8a570`, found via AOB) in `WUDFHost.exe` — driver `synaWudfBioUsb103.dll`
+**v6.0.18.1103** (exact build we RE'd). Tooling: `wincapture/`. Raw log (with hex)
+kept out of git (contains the friend's Windows SID); templates below are redacted.
+
+### ROOT CAUSE of our enroll crash — RESOLVED (SAP was a red herring)
+Our cold `add_image` faulted the sensor because we were missing, before it:
+1. the **`0x39` "sensor/IPL config" command** (pushed around every capture), and
+2. the correct **17-byte production `FRAME_ACQ`** (we used the 25-byte *diagnostic*
+   mode-3 variant, which is the wrong capture mode for the matcher).
+**No SAP / `AuthenticateUserStorageOnSensor` / `0x6a` / secureBio command appears
+anywhere in the enroll or verify capture.** The static-RE "auth session" gate is
+satisfied by this production capture sequence, not a separate handshake. Also: enroll
+persists the template **on-chip via the `0x96/3` commit** — there is **no `0xa2`
+WRITE_OBJECT and no host `pEncryptedTemplate`**. Both prior blockers dissolve.
+
+### Command byte templates (all little-endian; `[opcode][body]`, TLS-wrapped)
+- **enroll_start** = `96 01` + `00`×10  (13B). Reply 6B `00 00 00 00 00 00`.
+- **add_image** = `96 02 00 00 00`  (5B). Reply **82B** = `[status u16][TUID 16B]
+  [size u32 = 0x3c][60B QM stat]`. TUID is zeros until the FINAL image, then the
+  sensor-assigned 16B TUID. Stat: `+0x00` coverage bitmask (01,03,07,0f,1f,3f,7f,ff…),
+  **`+0x02` u8 progress %** (12→25→37→50→62→75→87→…→100), `+0x1c` templateCount, etc.
+  Complete when progress==100.
+- **enroll_commit** = `96 03` + `[u32 0][u32 0x6f][u16 0][u16 0x10][u32 0]` +
+  `[TUID 16B]` + `01 00` + `[u32 0x4c][u32 3][u32 0x1c]` + `[Windows SID ~28B]` +
+  zero-pad + `02 00 01 00 00 00 f7`  (124B). Reply 2B `0000`. (For Linux, substitute
+  our own user-id blob for the SID; TUID comes from the final add_image reply.)
+- **enroll_end** = `96 04 00 00 00`  (5B). Reply `0000`.
+- **verify / identify** = `99 01` + `00`×10  (13B) — identify against all on-chip
+  templates. Reply: **no-match** → 2B `09 05` (status `0x0509` MATCHER_MATCH_FAILED);
+  **match** → **177B** = `[status u16][matched TUID 16B][size u32 = 0x24][36B QM
+  result]…` — score is a u32 in the QM result (observed `0x65e`). (Windows also fires
+  this once pre-enroll as a duplicate check; `0x0509` = "not a duplicate".)
+- **0x39 sensor/IPL config** = `39` + `[u32 param]` + a static record body. Only **4
+  distinct bodies** across 42 sends (differ only in the leading u32), e.g. the capture
+  variant `39 <u32> 4b000000 07 8c 00 20 8c8c… (4b/8c/00/20 records)`, a clear/zero
+  variant, and two `0587/0620`-record variants. Reply 2B `0000`. → replayable; not
+  per-frame dynamic. (Opcode 0x39 = the "SensorCfg/IPL playback" the static RE flagged
+  as gating capture.)
+- **FRAME_ACQ (production)** = `80 0c000000 01000000 01000008 01010100`  (17B). Reply `0000`.
+- **FRAME_FINISH** = `81`  (1B). Reply `0000`.
+- **EVENT_CONFIG** = `86` + `4×u32 maskA` + `4×u32 maskB` + `u32 count` (37B). Finger
+  arm uses maskA=maskB=`6` (events 1,2 = FINGER_PRESS|REMOVE); other sends vary the
+  small mask/count as the finger/frame state advances. Reply 66B.
+- **EVENT_READ** = `87 <u8 seq> 00 20 00 01 00 00 00` (9B). Reply 18B; a latched frame
+  shows trailing `…00 00 00 80`.
+- **GET_DB_INFO** = `9e 01` (2B). Reply 40B (per-type counts) — Windows calls it once at commit.
+
+### Per-image enroll sequence (observed order)
+`enroll_start` → [pre-enroll dup check `0x99`] → repeat until progress==100:
+  finger-wait (`EVENT_CONFIG(6)` + `EVENT_READ`) → `0x39` → `EVENT_CONFIG` +
+  `FRAME_ACQ(17B)` → `EVENT_READ` (frame-ready `…80`) → `0x39` → `FRAME_FINISH` →
+  `add_image(0x96/2)` → parse stat.
+Then: `enroll_commit(0x96/3, TUID+userid)` → `GET_DB_INFO` → `enroll_end(0x96/4)`.
+**Verify** = same capture arming (`0x39`+`FRAME_ACQ(17B)`+finger) then `0x99` identify.
+
+### Phase D5 (implement in pydrv, validate on our sensor)
+Replace the crashing path with this recipe: fix `FRAME_ACQ` to the 17B production
+form, add the `0x39` config sends (replay a captured body), follow the per-image
+sequence, then `add_image` → loop to 100 → commit(`0x96/3`) → end(`0x96/4`); verify
+via `0x99`. Open items to confirm on-device: whether the 4 `0x39` bodies are Augusta-
+generic (expected: yes, same fw) or need per-sensor values; the exact minimal
+EVENT_CONFIG interleave; the commit user-id blob for Linux.

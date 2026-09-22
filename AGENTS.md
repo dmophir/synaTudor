@@ -30,13 +30,19 @@ independently-validated binary RE of the capture protocol). Keep both up to date
   corrections — MOC enroll/verify do **NOT** arm `FRAME_ACQ`/`EVENT_CONFIG` (sensor
   captures on-chip on the `0x96`/`0x99` cmd); **SAP not needed** for DB2. See
   `docs/frame-capture-re.md` → "RESIDUAL RE RESOLVED" + updated "PHASE C PLAN".
-- **NEXT — Phase C (gated, awaiting go):** ordered: (1) fix `comm.py` DB2 enum;
-  (2) DB2 read path (`0x9e/0x9f/0xa0/0xa1`, filter type `0x20`) — safe on-device
-  validation; (3) `mis*` 0x96/0x99 builders + QM parse; (4) enroll state machine
-  (loop AddImage to progress==100); (5) template persist via `WRITE_OBJECT 0xa2`;
-  (6) verify/identify. **⚠ Phase C BLOCKER:** the stored template is a host-built
-  `pEncryptedTemplate` (crypto wrap NOT yet decoded) — templates may not round-trip
-  until that's RE'd/replicated. Deferred Match-On-Host path is the fallback if MOC stalls.
+- **WINDOWS CAPTURE DONE (2026-07-24): full enroll+verify recipe obtained.** Frida
+  plaintext capture on an identical Windows tablet (`wincapture/`) gave ground truth.
+  **Our enroll crash root cause: missing the `0x39` sensor/IPL-config command + wrong
+  `FRAME_ACQ` (used 25B diagnostic; production is 17B `80 0c000000 01000000 01000008
+  01010100`).** No SAP and no `0xa2`/pEncryptedTemplate exist in the flow — the
+  template persists on-chip via the `0x96/3` commit; both prior "blockers" dissolved.
+  Enroll = start(`0x96/1`) → per-image[`0x39`+`FRAME_ACQ(17B)`+finger wait →
+  `add_image 0x96/2`→82B stat, progress@stat+2 to 100] → commit(`0x96/3`, TUID+userid)
+  → end(`0x96/4`); verify = capture-arm + `0x99` identify (177B reply w/ matched TUID
+  + score). Full byte templates: `docs/frame-capture-re.md` → "WINDOWS DYNAMIC CAPTURE".
+- **NEXT — Phase D5 (implement + validate):** rework `pydrv` enroll/verify to the
+  captured recipe (17B FRAME_ACQ + `0x39` config), validate on our sensor with finger
+  presses. Open: whether the 4 static `0x39` bodies are Augusta-generic or per-sensor.
 - **Binary RE:** use the local **`re`** subagent (`.opencode/agent/re.md`, Opus,
   gitignored). Both adapter DLLs (`synaFpAdapter103/104.dll`) + USB DLLs + r2 seed
   dumps are now staged in the sandbox `re-frameacq/`.
