@@ -28,6 +28,7 @@ QM_MATCH_RESULT_SIZE = 0x24  # 36
 #mis-layer result codes surfaced by the enroll orchestration
 ENROLL_RES_MORE = 305   # 0x131 more images needed
 ENROLL_RES_FAIL = 304   # 0x130 failed / fixed-pattern
+MATCHER_NO_MATCH = 0x0509   # verify/identify reply status when no template matched
 
 #--- Per-image capture recipe, byte-for-byte from the Windows enroll capture (2026-09-22).
 #0x39 (LED_EX2) sensor/IPL config pushed around each capture. Leading u32 (here 0x3e8) is a
@@ -66,6 +67,7 @@ class MatchResult:
     def __init__(self, raw : bytes, auxA : bytes = b"", auxB : bytes = b""):
         assert len(raw) >= QM_MATCH_RESULT_SIZE
         self.raw = raw
+        self.matched_tuid = None
         self.score, = struct.unpack_from("<I", raw, 0x00)
         self.template_update, = struct.unpack_from("<I", raw, 0x14)
         self.updated_ref, = struct.unpack_from("<I", raw, 0x1c)
@@ -189,21 +191,32 @@ class SensorMatcher:
 
     #--- identify / verify (opcode 0x99) ---
 
-    def identify_match(self, template_uids : list, timeout : int = 15000) -> MatchResult:
-        #request: [0x99][u32 const=1][u32 list_len=n*16][u32 blob_len=0][n x 16-byte UID refs]
+    def identify(self, template_uids : list = None, timeout : int = 15000):
+        #Identify the currently-captured finger. template_uids=None/[] => identify against
+        #ALL on-chip templates (nTemplates=0), as Windows does. Returns a MatchResult on a
+        #match (with .matched_tuid) or None on no-match (status 0x0509 MATCHER_MATCH_FAILED).
+        if template_uids is None: template_uids = []
         for u in template_uids: assert len(u) == 16
         n = len(template_uids)
-        payload = b"".join(template_uids)
-        req = struct.pack("<BIII", tudor.Command.MATCHER_IDENTIFY, 1, n * 16, 0) + payload
+        req = struct.pack("<BIII", tudor.Command.MATCHER_IDENTIFY, 1, n * 16, 0) + b"".join(template_uids)
         status, resp = self._send(req, 0x400, timeout)
+        if status == MATCHER_NO_MATCH:
+            return None
         if status not in tudor.SUCCESS_STATUS: raise tudor.CommandFailedException(status)
         if len(resp) < 0x1e + QM_MATCH_RESULT_SIZE:
-            raise Exception("identify_match short reply (%d): %s" % (len(resp), resp.hex()))
-        qm_size, auxA_len, auxB_len = struct.unpack_from("<III", resp, 0x12)
+            raise Exception("identify short reply (%d): %s" % (len(resp), resp.hex()))
+        matched_tuid = resp[2:18]
+        qm_size, = struct.unpack_from("<I", resp, 0x12)
         if qm_size != QM_MATCH_RESULT_SIZE:
             raise Exception("QM match-result size mismatch host=%d sensor=%d" % (QM_MATCH_RESULT_SIZE, qm_size))
-        off = 0x1e
-        result = resp[off:off + QM_MATCH_RESULT_SIZE]; off += QM_MATCH_RESULT_SIZE
-        auxA = resp[off:off + auxA_len]; off += auxA_len
-        auxB = resp[off:off + auxB_len]
-        return MatchResult(result, auxA, auxB)
+        mr = MatchResult(resp[0x1e:0x1e + QM_MATCH_RESULT_SIZE])
+        mr.matched_tuid = matched_tuid
+        return mr
+
+    def verify(self, finger_budget_s : float = 30):
+        #Capture one frame (same arm as enroll) then identify against all on-chip templates.
+        #Returns MatchResult (on match) or None (no match / no finger).
+        ev = self.capture_one_frame(finger_budget_s=finger_budget_s)
+        if ev is None:
+            return None
+        return self.identify()
