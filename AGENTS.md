@@ -49,9 +49,15 @@ independently-validated binary RE of the capture protocol). Keep both up to date
   pEncryptedTemplate needed.** Code: `pydrv/tudor/sensor/moc.py`
   (`SensorMatcher.enroll_loop`/`capture_one_frame`/`enroll_commit`); probes
   `diag/enroll_probe.py` + `diag/event_diag.py`.
-- **NEXT — Phase D5.4 (verify):** `0x99` identify-against-all (`99 01 00…`, nTemplates=0)
-  → 177B reply w/ matched TUID + 36B QM result (score). Match enrolled finger, reject
-  impostor; pick a score threshold. Minor: DB2 template list parse (count=1 but empty uids).
+- **VERIFY WORKS ON LINUX (2026-09-22): full enroll+verify pipeline validated.** `0x99`
+  identify-against-all (`99 01 00…`, nTemplates=0): enrolled finger → MATCH (correct TUID
+  `bdca62a0…`, score ~1800–2400, `templateUpdate=1` adaptive); non-enrolled finger →
+  NO MATCH (status `0x0509`). `SensorMatcher.verify`/`identify` in `pydrv/tudor/sensor/moc.py`;
+  `diag/verify_probe.py`. **The core goal is met: match-on-chip enroll + verify from Linux.**
+- **NEXT — polish/integration:** (a) fix DB2 template list parse (GET_OBJECT_LIST returns
+  count=1 but our parser yields no uids); (b) wire `drvcmd` enroll/verify + persist the
+  commit user-id/TUID mapping; (c) libfprint driver so fprintd/PAM can use it; (d) tidy the
+  `0x39` leading-u32 + FRAME_ACQ flag variants (currently fixed captured values, work fine).
 - **Binary RE:** use the local **`re`** subagent (`.opencode/agent/re.md`, Opus,
   gitignored). Both adapter DLLs (`synaFpAdapter103/104.dll`) + USB DLLs + r2 seed
   dumps are now staged in the sandbox `re-frameacq/`.
