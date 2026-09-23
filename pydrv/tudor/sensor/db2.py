@@ -57,9 +57,16 @@ class SensorDB2:
         return DB2Info(resp[2:])
 
     def list_objects(self, category : int, key : bytes = None):
-        """Returns (status, entries, raw_payload). Request body = category(u8)+3pad+16B key.
-        Response payload framing (confirmed on-device, empty DB): u16 count, then count x 16-byte
-        UID entries."""
+        """Low-level GET_OBJECT_LIST (0x9f). Returns (status, entries, raw_payload).
+        Request body = category(u8)+3pad+16B key. Response payload framing (confirmed
+        on-device): u16 count, then count x 16-byte UID entries.
+
+        NOTE the DB2 object hierarchy (confirmed on-device 2026-09-22): USER objects
+        (category 1) are top-level and listed with a ZERO key; TEMPLATE (2) and PAYLOAD
+        (3) objects are enumerated PER-USER -- the 16-byte key must be the parent user's
+        UID, not zero. Listing templates with a zero key returns count=0 even when
+        GET_DB_INFO reports templates present. Prefer the list_users/list_templates/
+        iter_templates helpers below over calling this directly."""
         if key is None: key = bytes(16)
         assert len(key) == 16
         req = struct.pack("<BB", tudor.Command.DB2_GET_OBJ_LIST, category) + bytes(3) + key
@@ -71,6 +78,44 @@ class SensorDB2:
             body = payload[2:]
             entries = [body[i*16:(i+1)*16] for i in range(count) if (i+1)*16 <= len(body)]
         return status, entries, payload
+
+    def list_users(self):
+        """Returns the list of 16-byte USER UIDs (top-level; zero key)."""
+        status, entries, _ = self.list_objects(DB2_CAT_USER, bytes(16))
+        if status not in tudor.SUCCESS_STATUS: raise tudor.CommandFailedException(status)
+        return entries
+
+    def list_templates(self, user_uid : bytes):
+        """Returns the 16-byte TEMPLATE UIDs (TUIDs) belonging to the given user."""
+        assert len(user_uid) == 16
+        status, entries, _ = self.list_objects(DB2_CAT_TEMPLATE, user_uid)
+        if status not in tudor.SUCCESS_STATUS: raise tudor.CommandFailedException(status)
+        return entries
+
+    def iter_templates(self):
+        """Walks every user and yields (user_uid, tuid) for each on-chip template.
+        This is the correct way to enumerate all enrolled templates (see list_objects
+        note): first list users, then list templates under each user."""
+        for user_uid in self.list_users():
+            for tuid in self.list_templates(user_uid):
+                yield user_uid, tuid
+
+    def all_template_uids(self):
+        """Convenience: flat list of every TUID currently on-chip."""
+        return [tuid for _, tuid in self.iter_templates()]
+
+    def delete_object(self, category : int, uid : bytes):
+        """DB2_DELETE_OBJ (0xa3). Reversible-in-spirit destructive op on a single object;
+        body = category(u8) + 3pad + 16B uid (wire = op + 20-byte body). Verified against
+        the 103 builder fcn.1800aea50 (category at body[0], uid memcpy'd at body[4] => 3 pad;
+        the same framing as GET_OBJECT_INFO/DATA). Returns (status, deleted_objects).
+        Used to remove an enrolled template (category 2). NOT format -- targets one UID."""
+        assert len(uid) == 16
+        req = struct.pack("<BB", tudor.Command.DB2_DELETE_OBJ, category) + bytes(3) + uid
+        status, resp = self._cmd(req, 0x40)
+        if status not in tudor.SUCCESS_STATUS: raise tudor.CommandFailedException(status)
+        deleted = struct.unpack_from("<H", resp, 2)[0] if len(resp) >= 4 else None
+        return status, deleted
 
     def get_object_info(self, category : int, uid : bytes):
         assert len(uid) == 16

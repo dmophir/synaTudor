@@ -850,3 +850,89 @@ sequence, then `add_image` → loop to 100 → commit(`0x96/3`) → end(`0x96/4`
 via `0x99`. Open items to confirm on-device: whether the 4 `0x39` bodies are Augusta-
 generic (expected: yes, same fw) or need per-sensor values; the exact minimal
 EVENT_CONFIG interleave; the commit user-id blob for Linux.
+
+## POLISH/INTEGRATION RE + ON-DEVICE (2026-09-22, session 2)
+Item (a)+(b)+(d) work. Re-staged `synaWudfBioUsb103.dll` (SHA1
+`c3f1a34e476df4f933a4b57f2399c80c4998f06d`) and did the RE **directly in radare2**
+(the `re` subagent hit a model error). All findings validated on `06cb:00bc`.
+
+### The `0x96/3` enroll-commit body — FULLY DECODED (builder `fcn.1800af17f`)
+The docs previously mislabeled the commit builder as `fcn.1800a4bf0` (that is a 5-byte
+`0x96` cmd). The real commit builder is **`fcn.1800af17f`** (allocator `fcn.1800af420`,
+sender `fcn.1800af510` → `tudorSendAnyCommand`). Exact wire (LE), verified to
+byte-for-byte reconstruct the captured 124-byte commit:
+```
+[0x96][u32 sub_op=3][u32 0][u32 payload_len][payload]      ; payload_len @ buf+9 (=0x6f/111)
+payload (111B) =
+  [_CD_HDR 6B = 00 00 10 00 00 00]        ; const; the 0x10 is the TUID length (16)
+  [TUID 16B]                              ; from the final add_image reply
+  [_CD_MARKER 2B = 01 00]                 ; const (identity-present / count=1)
+  [u32 identity_len = 0x4c = 76]          ; = sizeof(WINBIO_IDENTITY)
+  [WINBIO_IDENTITY 76B]
+  [_CD_TRAILER 7B = 02 00 01 00 00 00 f7] ; const
+WINBIO_IDENTITY (76B) = [u32 Type][u32 Size][Data[SECURITY_MAX_SID_SIZE=68]]
+  Type = 3 (SID) in the capture (2 = GUID also valid); Size = real identity byte length
+  (0x1c=28 for the captured SID); Data = identity bytes + zero pad to 68.
+```
+So the "mystery" header bytes were the **payload length (111)** at buf+9 and the **TUID
+length (16)** in the descriptor. Builder proof: `mov [buf+1],3` (sub-op); `[buf+9]=*arg`
+(payload_len); `memcpy(buf+13, src, payload_len)` (0x1800625f0); the inner
+`WINBIO_IDENTITY` is copied with its own `Type`/`Size`/`Data[68]`.
+
+**Variable-length user-id (per the session decision): SOLVED + on-device validated.**
+Because `Data` is a fixed 68-byte array, the identity slot is a fixed 76 bytes and the
+total request stays 124 bytes for any identity ≤68 B — only `Size` and the `Data` bytes
+change. `pydrv/tudor/sensor/moc.py::build_enroll_commit(tuid, user_id, identity_type)`
+computes `identity_len`/`payload_len` from the data (so >68 B would grow correctly too)
+and reproduces the capture exactly for the SID case. **There is NO host-side template
+encryption** — the commit body is a plain struct over the existing TLS; the earlier
+`pEncryptedTemplate` "crypto wrap" worry is retired.
+
+On-device (2026-09-22): enrolled a fresh finger under a **host-synthesized SID** (base
+SID + per-label RID via `make_linux_sid`, `identity_type=3`) → progress 12→100 →
+`commit 0x96/3` accepted → new DB2 template + user created → `0x99` verify MATCHES it
+and maps to the host label. So the commit accepts identities other than the captured SID.
+
+### DB2 template enumeration — the real model (corrects earlier "list by category")
+`GET_OBJECT_LIST 0x9f` framing is `[u16 count][count × 16B UID]` (as before), but the
+object hierarchy is **hierarchical/per-user**:
+- **Users** (category 1) are top-level → list with a **zero key**.
+- **Templates** (category 2) and **payloads** (category 3) are enumerated **under a
+  user** → the 16-byte request key must be the **parent user UID**, not zero. Listing
+  templates with a zero key returns `count=0` even when `GET_DB_INFO` shows templates.
+Correct enumeration = list users (zero key) → for each user, list templates (key=user
+UID). Implemented as `SensorDB2.list_users`/`list_templates`/`iter_templates`. Confirmed
+on-device: the test template `bdca62a0…` is found under user `3a8cd4f6…`; `GET_OBJECT_INFO
+0xa0` returns a 50-byte record embedding the parent user UID. (`GET_OBJECT_DATA 0xa1` on a
+template returns `0x04b6` — the on-chip template blob is not host-readable; not needed for
+enumerate/delete.)
+
+### ⚠ Correction 3 — DELETE_OBJECT (0xa3) uses **3 pad bytes**, not 2
+The "RESIDUAL RE RESOLVED" entry said `0xa3` body = `pack('<BB',0xa3,type)+2pad+uid16`.
+Wrong. Builder `fcn.1800aea50`: allocator `edx=0x14` (20-byte **body**, wire=21 incl
+opcode); it writes `category` at body[0] then `memcpy(body+4, uid, 16)` → **3 pad bytes**
+between category and uid (same framing as GET_OBJECT_INFO/DATA). A 2-pad request returns
+`0x0405` (GEN_BAD_PARAM). Fixed in `SensorDB2.delete_object`; delete validated on-device
+(`status 0x0000`, `deleted_objects=2` = template + its payload).
+
+### Landmarks (103 Augusta)
+| item | 103 addr |
+|---|---|
+| enroll-commit builder (0x96/3) | `fcn.1800af17f` |
+| enroll start / add_image / (get_template) builders | `fcn.1800a4120` / `fcn.1800a4600` / `fcn.1800a4bf0` |
+| DB2 allocator / sender | `fcn.1800af420` / `fcn.1800af510` |
+| DELETE_OBJECT (0xa3) builder | `fcn.1800aea50` |
+| memcpy helper | `fcn.1800625f0` |
+
+### pydrv changes (branch `00bc-dev`)
+- `sensor/db2.py`: per-user enumeration (`list_users`/`list_templates`/`iter_templates`/
+  `all_template_uids`), `delete_object` (3-pad, 0xa3).
+- `sensor/moc.py`: `build_enroll_commit` (WINBIO_IDENTITY, variable-length), `make_linux_sid`,
+  `WIN_CAPTURED_SID`, WINBIO_ID_TYPE_* consts; `enroll_commit(tuid, user_id, identity_type)`;
+  capture constants tidied (`0x39` split into opcode+`LED_EX2_COUNTER`+static tail; FRAME_ACQ
+  fields annotated) — byte-identical to the captured values.
+- `driver/drvcmd/`: `enroll`/`verify`/`identify`/`templates` REPL commands; `tmpl_store.py`
+  (host label↔TUID JSON at `/etc/tudor/<id>.templates.json`); lazy matplotlib import so the
+  CLI runs headless.
+- Diag probes: `db2_probe.py` (updated), `db2_list_probe.py`, `moc_e2e_probe.py`,
+  `templates_probe.py`.

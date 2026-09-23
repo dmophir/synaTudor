@@ -72,15 +72,29 @@ def main():
         except Exception as e:
             print("  GET_DB_INFO failed: %r" % e)
 
-        print(">>> GET_OBJECT_LIST (categories 1..3)")
+        print(">>> GET_OBJECT_LIST (users top-level, then templates/payloads per-user)")
         all_entries = {}
-        for cat, name in [(DB2_CAT_USER, "user"), (DB2_CAT_TEMPLATE, "template"), (DB2_CAT_PAYLOAD, "payload")]:
-            try:
-                all_entries[cat] = dump_list(db2, cat, name)
-            except Exception as e:
-                print("  LIST cat=%d failed: %r" % (cat, e))
+        try:
+            users = dump_list(db2, DB2_CAT_USER, "user")
+        except Exception as e:
+            print("  LIST users failed: %r" % e); users = []
+        template_pairs = []
+        for uidx, user in enumerate(users):
+            print("  under user[%d]=%s:" % (uidx, user.hex()))
+            for cat, name in [(DB2_CAT_TEMPLATE, "template"), (DB2_CAT_PAYLOAD, "payload")]:
+                try:
+                    status, entries, payload = db2.list_objects(cat, user)
+                    print("    LIST cat=%d(%s) status=0x%04x count=%d raw=%s"
+                          % (cat, name, status, len(entries), hexdump(payload, 96)))
+                    for i, e in enumerate(entries):
+                        print("      entry[%d]: %s" % (i, e.hex()))
+                        if cat == DB2_CAT_TEMPLATE:
+                            template_pairs.append((user, e))
+                except Exception as e:
+                    print("    LIST cat=%d failed: %r" % (cat, e))
+        all_entries[DB2_CAT_TEMPLATE] = [t for _, t in template_pairs]
 
-        print(">>> GET_OBJECT_INFO / GET_OBJECT_DATA per listed UID")
+        print(">>> GET_OBJECT_INFO / GET_OBJECT_DATA per template UID")
         for cat, entries in all_entries.items():
             for i, uid in enumerate(entries):
                 try:

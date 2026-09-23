@@ -8,7 +8,7 @@ This is a fork of `Popax21/synaTudor` being used to bring the Synaptics
 companion [`docs/frame-capture-re.md`](docs/frame-capture-re.md) (detailed,
 independently-validated binary RE of the capture protocol). Keep both up to date.
 
-## Current status (2026-07-24)
+## Current status (2026-09-22)
 - **DONE:** Linux OWNS the sensor — pairing + TLS 1.2 + encrypted command channel
   all work on `06cb:00bc` (Augusta, fw 10.1). Windows fingerprint enrollment is
   now BROKEN (expected; recoverable via Windows re-enroll).
@@ -54,10 +54,27 @@ independently-validated binary RE of the capture protocol). Keep both up to date
   `bdca62a0…`, score ~1800–2400, `templateUpdate=1` adaptive); non-enrolled finger →
   NO MATCH (status `0x0509`). `SensorMatcher.verify`/`identify` in `pydrv/tudor/sensor/moc.py`;
   `diag/verify_probe.py`. **The core goal is met: match-on-chip enroll + verify from Linux.**
-- **NEXT — polish/integration:** (a) fix DB2 template list parse (GET_OBJECT_LIST returns
-  count=1 but our parser yields no uids); (b) wire `drvcmd` enroll/verify + persist the
-  commit user-id/TUID mapping; (c) libfprint driver so fprintd/PAM can use it; (d) tidy the
-  `0x39` leading-u32 + FRAME_ACQ flag variants (currently fixed captured values, work fine).
+- **POLISH/INTEGRATION (a)+(b)+(d) DONE (2026-09-22 session 2):** validated on `06cb:00bc`.
+  (a) **DB2 enumeration fixed** — templates are enumerated **per-user** (`GET_OBJECT_LIST`
+  key = parent user UID; zero key → count 0); added `SensorDB2.list_users`/`list_templates`/
+  `iter_templates`. (b) **drvcmd `enroll`/`verify`/`identify`/`templates` commands** + host
+  label↔TUID store (`/etc/tudor/<id>.templates.json`) + **variable-length commit**: RE'd the
+  `0x96/3` body in radare2 (builder `fcn.1800af17f`) → `[0x96][u32 3][u32 0][u32 payload_len]
+  [descriptor]` embedding the TUID + a standard **WINBIO_IDENTITY** (`Type`/`Size`/`Data[68]`);
+  `build_enroll_commit` reconstructs the capture byte-for-byte and takes an arbitrary-length
+  user id (`make_linux_sid` for per-label SIDs). **No host template encryption** — plain
+  struct over TLS. **DELETE_OBJECT 0xa3 corrected to 3 pad bytes** (was 2 → `0x0405`). CLI made
+  headless (lazy matplotlib). End-to-end validated: enroll under a host-synthesized SID →
+  new DB2 template+user → verify matches + maps to label → delete removes it. (d) capture
+  constants tidied in `moc.py` (byte-identical). Detail: `docs/frame-capture-re.md` →
+  "POLISH/INTEGRATION RE + ON-DEVICE (2026-09-22, session 2)".
+- **NEXT — (c) libfprint MOC driver (scope separately):** the in-tree `tudor.c` is an
+  `FpImageDevice` (host-capture + host-match) — wrong base class for match-on-chip. Build a
+  new `FpDevice`-based MOC driver (mirror `goodixmoc`: enroll/verify/identify/list/delete/
+  clear-storage vfuncs, backed by pydrv's `SensorMatcher` or native C), add `06cb:00bc`(+`00a9`)
+  to the id_table, package as a TOD module + udev + fprintd + PAM. Minor follow-ups: prune
+  orphaned DB2 user slots (CLEANUP `0xa4`) after template delete; optional `--pid 0x00bc`
+  default in `tudor.driver`.
 - **Binary RE:** use the local **`re`** subagent (`.opencode/agent/re.md`, Opus,
   gitignored). Both adapter DLLs (`synaFpAdapter103/104.dll`) + USB DLLs + r2 seed
   dumps are now staged in the sandbox `re-frameacq/`.

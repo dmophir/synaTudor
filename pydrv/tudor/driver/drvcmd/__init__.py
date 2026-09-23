@@ -11,3 +11,6 @@ from .pair import *
 from .init import *
 from .event import *
 from .capture import*
+from .enroll import *
+from .verify import *
+from .templates import *

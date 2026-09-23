@@ -727,6 +727,35 @@ the full on-chip enroll/verify/store command spec (durable ref:
 - **Next (gated): Phase C** — implement `mis*` + QM struct + enroll/verify state
   machines + DB2 store in `pydrv/`, validate on-device (enroll finger → verify match).
 
+### 2026-09-22 (session 2) — polish/integration: DB2 enum + drvcmd enroll/verify + var-len commit
+Items (a)+(b)+(d) from the "NEXT" list are DONE and validated on `06cb:00bc`. Full RE
+detail in [`frame-capture-re.md`](frame-capture-re.md) → "POLISH/INTEGRATION RE + ON-DEVICE
+(2026-09-22, session 2)". Highlights:
+- **(a) DB2 template enumeration fixed.** Templates/payloads are enumerated **per-user**
+  (the `GET_OBJECT_LIST 0x9f` key = parent user UID; a zero key returns `count=0`). Added
+  `SensorDB2.list_users`/`list_templates`/`iter_templates`/`all_template_uids`. On-device:
+  the test template `bdca62a0…` is now correctly listed under user `3a8cd4f6…`.
+- **(b) drvcmd enroll/verify/templates + host mapping + variable-length commit.**
+  RE'd the `0x96/3` commit body directly in radare2 (builder `fcn.1800af17f`): the wire is
+  `[0x96][u32 3][u32 0][u32 payload_len][descriptor]` where the descriptor embeds the 16-byte
+  TUID and a standard **WINBIO_IDENTITY** (`Type`/`Size`/`Data[68]`). `build_enroll_commit`
+  reconstructs the capture byte-for-byte and supports an **arbitrary-length user identity**
+  (Size/Data computed). Added REPL `enroll <label>` / `verify` / `identify` /
+  `templates list|delete`, a host label↔TUID store (`/etc/tudor/<id>.templates.json`), and
+  `make_linux_sid` (per-label SID). **NO host template encryption exists** — the commit is a
+  plain struct over TLS. Also made the CLI import headless (lazy matplotlib).
+  On-device end-to-end: enrolled a finger under a **host-synthesized SID** (not the captured
+  one) → progress 12→100 → commit → new DB2 template+user → `verify` matches it and maps to
+  the label → `templates delete` removes it (sensor back to 1 template). **DELETE_OBJECT 0xa3
+  needed a fix: 3 pad bytes, not 2** (builder `fcn.1800aea50`; 2-pad → `0x0405`).
+- **(d) capture constants tidied** in `moc.py` (0x39 split into opcode+counter+static tail;
+  FRAME_ACQ fields annotated) — verified byte-identical to the captured values.
+- **Remaining: (c) libfprint MOC driver.** The in-tree `tudor.c` is an `FpImageDevice`
+  (host-capture + host-match) — wrong base class for match-on-chip. A new `FpDevice`-based
+  MOC driver (mirroring `goodixmoc`: enroll/verify/identify/list/delete/clear-storage vfuncs,
+  backed by pydrv's `SensorMatcher` or native C) is the path to fprintd/PAM. To be scoped
+  in a dedicated session.
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229

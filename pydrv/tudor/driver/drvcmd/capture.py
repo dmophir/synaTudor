@@ -1,7 +1,6 @@
 from .cmd import *
 from .context import *
 
-import matplotlib.pyplot as plt
 import tudor.sensor
 
 @cmd("capture_images")
@@ -12,6 +11,10 @@ class CmdCaptureImages(Command):
     """
 
     def run(self, ctx : CmdContext, args : list):
+        #matplotlib is only needed to display captured frames; import it lazily so the
+        #rest of the CLI (enroll/verify/etc.) works headless without matplotlib/X.
+        import matplotlib.pyplot as plt
+
         if len(args) <= 0: raise Exception("No number of images provided")
         if not ctx.sensor.initialized: raise Exception("Sensor isn't initialized!")
         num_images = int(args[0])

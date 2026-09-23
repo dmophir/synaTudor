@@ -31,17 +31,65 @@ ENROLL_RES_FAIL = 304   # 0x130 failed / fixed-pattern
 MATCHER_NO_MATCH = 0x0509   # verify/identify reply status when no template matched
 
 #--- Per-image capture recipe, byte-for-byte from the Windows enroll capture (2026-09-22).
-#0x39 (LED_EX2) sensor/IPL config pushed around each capture. Leading u32 (here 0x3e8) is a
-#param/counter; the record tail is static. This is the piece our earlier attempt omitted.
-LED_EX2_CFG = bytes.fromhex("39e80300004b000000078c00208c8c000000000000000000004b000000010000200000000000000000000000004b000000018c00200000000000000000000000004b0000000100002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
-#FRAME_ACQ production 17-byte form (NOT the 25-byte diagnostic mode-3 that crashed us).
+#These are Augusta-generic fixed captured values (validated on our 06cb:00bc). They arm the
+#on-chip frame capture that precedes each add_image; the host receives no pixels.
+#
+#0x39 = LED_EX2 / "SensorCfg-IPL playback" config, pushed around each capture. Wire form:
+#  [0x39][u32 counter][static record tail]. Only the leading u32 counter varied across the
+#42 captured sends (the record tail is identical); 0x3e8 is a safe replayable value.
+LED_EX2_COUNTER = 0x3e8
+_LED_EX2_TAIL = bytes.fromhex("4b000000078c00208c8c000000000000000000004b000000010000200000000000000000000000004b000000018c00200000000000000000000000004b0000000100002000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+LED_EX2_CFG = struct.pack("<BI", 0x39, LED_EX2_COUNTER) + _LED_EX2_TAIL
+#FRAME_ACQ production 17-byte form (NOT the 25-byte diagnostic mode-3 that crashed us):
+#  [0x80][u32 flags=0x0c][u32 num_frames=1][u32 0x08000001][u32 0x00010101]
+#The last two u32s are the fixed production capture-mode flags for the matcher path.
 FRAME_ACQ_17B = bytes.fromhex("800c000000010000000100000801010100")
-FRAME_FINISH = bytes([0x81])   # 0x81 = FRAME_FINISH
+FRAME_FINISH = bytes([0x81])   # 0x81 = FRAME_FINISH (teardown after each armed capture)
 
-#enroll_commit (0x96/3) captured template; TUID substituted at send time. The 28-byte
-#Windows SID is kept as an opaque identity blob (parameterize later for Linux users).
-_COMMIT_TEMPLATE = bytes.fromhex("9603000000000000006f000000000010000000160c87f6c0a157979e419e99492af0ef01004c000000030000001c000000010500000000000515000000619fb3c507285b02c10f762de903000000000000000000000000000000000000000000000000000000000000000000000000000000000000020001000000f7")
-_COMMIT_CAPTURED_TUID = bytes.fromhex("160c87f6c0a157979e419e99492af0ef")
+#--- enroll_commit (0x96/3) body, RE'd from the 103 builder fcn.1800af17f (2026-09-22)
+#and verified to byte-reconstruct the Windows dynamic capture. The commit wire is:
+#  [0x96][u32 sub-op=3][u32 0][u32 payload_len][payload]
+#where payload_len is set at buf+9 (=0x6f/111 in the capture) and payload (111B) is a
+#template descriptor:
+#  [_CD_HDR 6B][TUID 16B][_CD_MARKER 2B][u32 identity_len][WINBIO_IDENTITY][_CD_TRAILER 7B]
+#The identity is a standard Windows WINBIO_IDENTITY struct:
+#  [u32 Type][u32 Size][Data[SECURITY_MAX_SID_SIZE=68]]  (fixed 76-byte slot)
+#For a SID (Type=3), Size is the real SID byte-length and Data holds the SID + zero pad.
+#Length fields (identity_len, payload_len) are recomputed from the actual identity, so
+#an arbitrary-length user id is supported (Data is padded to >=68 to match Windows).
+WINBIO_ID_TYPE_NULL = 0
+WINBIO_ID_TYPE_WILDCARD = 1
+WINBIO_ID_TYPE_GUID = 2
+WINBIO_ID_TYPE_SID = 3
+SECURITY_MAX_SID_SIZE = 68   # WINBIO_IDENTITY.Value.AccountSid.Data[68]
+
+_CD_HDR = bytes.fromhex("000010000000")        # descriptor header (6B): u32 0, then tuid_len 0x10 (u16)
+_CD_MARKER = bytes.fromhex("0100")             # identity-present marker / count = 1
+_CD_TRAILER = bytes.fromhex("020001000000f7")  # fixed 7-byte enroll-commit trailer
+
+#The 28-byte Windows SID from the ground-truth capture. Used as the default identity so
+#enroll_commit() with no user id still reproduces the validated commit exactly; real
+#Linux enrollments pass their own identity (see driver enroll command).
+WIN_CAPTURED_SID = bytes.fromhex("010500000000000515000000619fb3c507285b02c10f762de9030000")
+
+def make_linux_sid(rid : int) -> bytes:
+    """Builds a well-formed 28-byte SID identity for a Linux user by reusing the proven
+    captured SID structure (revision/authority/sub-authorities) and substituting only the
+    trailing RID (last sub-authority). Keeps the exact byte shape the sensor accepted while
+    making each enrolled user unique. rid is a 32-bit host-chosen id (e.g. derived from a
+    label or an incrementing counter)."""
+    return WIN_CAPTURED_SID[:24] + struct.pack("<I", rid & 0xffffffff)
+
+def build_enroll_commit(tuid : bytes, user_id : bytes, identity_type : int = WINBIO_ID_TYPE_SID) -> bytes:
+    """Builds the 0x96/3 enroll-commit request for the given on-chip TUID and user identity.
+    user_id is the raw identity bytes (e.g. a SID); it is padded into the fixed 68-byte
+    WINBIO_IDENTITY Data field (Windows always sends 68). identity_type selects the
+    WINBIO_IDENTITY_TYPE (3=SID as captured, 2=GUID). All length fields are computed."""
+    assert len(tuid) == 16
+    data = user_id + bytes(max(0, SECURITY_MAX_SID_SIZE - len(user_id)))
+    identity = struct.pack("<II", identity_type, len(user_id)) + data
+    payload = _CD_HDR + tuid + _CD_MARKER + struct.pack("<I", len(identity)) + identity + _CD_TRAILER
+    return struct.pack("<BII", tudor.Command.MATCHER_ENROLL, ENROLL_COMMIT, 0) + struct.pack("<I", len(payload)) + payload
 
 class EnrollStat:
     """60-byte QM enroll stat (misEnrollAddImage reply)."""
@@ -114,11 +162,13 @@ class SensorMatcher:
             raise Exception("QM enroll-stat size mismatch host=%d sensor=%d (qm struct on host and MFW)" % (QM_ENROLL_STAT_SIZE, qm_size))
         return EnrollStat(resp[0x16:0x16 + QM_ENROLL_STAT_SIZE]), resp[2:18]
 
-    def enroll_commit(self, tuid : bytes, timeout : int = 5000) -> bytes:
-        #0x96/3: finalize + persist the on-chip template. Replays the captured 124-byte
-        #commit with our enrolled TUID substituted (identity blob kept as-is for now).
+    def enroll_commit(self, tuid : bytes, user_id : bytes = None, identity_type : int = WINBIO_ID_TYPE_SID, timeout : int = 5000) -> bytes:
+        #0x96/3: finalize + persist the on-chip template under the given user identity.
+        #user_id defaults to the captured Windows SID (reproduces the validated commit);
+        #Linux enrollments pass their own identity blob (variable length, see build_enroll_commit).
         assert len(tuid) == 16
-        req = _COMMIT_TEMPLATE.replace(_COMMIT_CAPTURED_TUID, tuid)
+        if user_id is None: user_id = WIN_CAPTURED_SID
+        req = build_enroll_commit(tuid, user_id, identity_type)
         status, resp = self._send(req, 0x40, timeout)
         if status not in tudor.SUCCESS_STATUS: raise tudor.CommandFailedException(status)
         return resp
