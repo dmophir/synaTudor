@@ -881,6 +881,45 @@ A1 end-state (1 print `right-index` → user **U1** `ff3fe9695cbdaee369b4541259f
 - **End state:** both fingers kept (U1, U2); sensor healthy. MOC is probabilistic — a couple
   of presses were legitimate no-matches (wrong finger / weak press) and passed on retry.
 
+### 2026-09-25 — A3: graphical + console login PAM; fixed the lock-screen "rapid fail-out"
+Roadmap item **A3** done, and it fixed the long-standing graphical-login blocker.
+- **GDM/GNOME graphical login needs NO PAM edit.** `/etc/pam.d/gdm-fingerprint` (stock Arch,
+  GDM 50 / GNOME Shell 50) already has `auth required pam_fprintd.so`; GDM runs it as a
+  separate path from `gdm-password`, so the greeter + lock screen offer fingerprint once a
+  finger is enrolled. (Console/TTY was the only path needing a change.)
+- **Root-caused the "rapid fail-out" (the known, previously-deprioritized issue).** With
+  verbose fprintd logging, the GNOME lock screen does an **identify** (1:N) and fires **three
+  attempts in ~1.5 s**, then falls back to password. Each attempt captured a frame
+  (`finger pressed; frame-ready=yes`) but `identify -> None`. The first attempt was a real
+  deliberate press; attempts 2–3 fired **instantly**, re-capturing the *still-present static
+  finger* → stale/poor frame → no-match → all three GNOME strikes burned in ~1 s.
+  (Confirmed with a read-only probe `diag/finger_present_probe.py` that the sensor only
+  EDGE-reports FINGER_PRESS and offers no finger-present level bit, and that a held finger
+  produces no fresh edge.)
+- **Fix (`pydrv/tudor/sensor/moc.py`, `capture_one_frame`): debounce.** A FINGER_PRESS that
+  arrives within `STALE_PRESS_S=0.4s` of arming means the finger was already down (held /
+  not lifted since the last attempt); in that case wait for a FINGER_REMOVE (≤`DEBOUNCE_
+  REMOVE_S=3s`) then a fresh press before capturing. This forces each GNOME re-arm to a
+  *deliberate* press (good frame) and paces the 3 attempts to human speed instead of
+  re-capturing one stale frame 3×. Fully local to the capture recipe; enroll benefits too
+  (a held finger no longer yields a stale image).
+- **Validated on the real GNOME lock screen** (restaged via `install-dev.sh`): first press →
+  `MatchResult(score=0x595)` → **verify-match**, unlocked immediately. A later lock: attempt
+  1 no-match, attempts 2–3 hit `finger already present at arm; waiting for lift + fresh
+  press` (paced 01:41:49→:50→:53) and attempt 3 → `score=0x6a2` → **verify-match**. User
+  confirmed on-screen unlock. Before the fix: 3 rapid no-match strikes → password.
+- **Console/TTY (optional, enabled):** added `auth sufficient pam_fprintd.so` to
+  `/etc/pam.d/login` after `pam_nologin` (backup `login.bak.tudor`; prefer `login` over
+  `system-local-login`, which `gdm-password` includes). TTY fingerprint login works;
+  password fallback works after the fingerprint attempts. **Known `pam_fprintd`/TTY quirk:**
+  while it waits for a finger the console isn't in password-read mode, so a typed password
+  echoes in cleartext and isn't accepted until the fingerprint attempts are exhausted
+  (inherent to pam_fprintd on a console; the graphical greeter is unaffected). Documented in
+  `libfprint-tod/PAM.md`.
+- **Safety:** `system-auth` never touched; `sufficient` + password fallback everywhere; GDM
+  password path untouched (no lockout). `sudo` PAM (fingerprint `sufficient`) benefits from
+  the same debounce.
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229

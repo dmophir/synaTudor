@@ -222,6 +222,16 @@ class SensorMatcher:
             time.sleep(0.05)
         return None
 
+    #Debounce: a FINGER_PRESS that fires within STALE_PRESS_S of arming means the finger was
+    #ALREADY down (held, or never lifted since the previous attempt). Capturing that static
+    #finger yields a stale/poor frame that no-matches -- and under GNOME/gnome-shell's rapid
+    #3-strike identify (it re-arms VerifyStart immediately after each no-match, confirmed in
+    #fprintd logs on 06cb:00bc) all three attempts get burned on the same stale frame in ~1s,
+    #forcing password fallback. When a press looks stale we require a deliberate lift + fresh
+    #press, which produces a good frame (like a normal deliberate touch, which matches).
+    STALE_PRESS_S = 0.4       # a PRESS within this of arming == finger already present
+    DEBOUNCE_REMOVE_S = 3.0   # wait at most this long for the finger to lift before giving up
+
     def capture_one_frame(self, finger_budget_s : float = 30, frame_budget_s : float = 8, should_cancel=None):
         #Captured Windows recipe: wait FINGER_PRESS -> LED_EX2 cfg -> arm frame event +
         #FRAME_ACQ(17B) -> wait frame-ready (EVENT10=24) -> LED_EX2 cfg -> FRAME_FINISH.
@@ -229,10 +239,20 @@ class SensorMatcher:
         #if no finger arrived within finger_budget_s. Raises CaptureCancelled if cancelled.
         eh = self.sensor.event_handler
         eh.set_event_mask([SensorEventType.FINGER_PRESS, SensorEventType.FINGER_REMOVE])
+        t0 = time.time()
         fp = self._poll_event(eh, [SensorEventType.FINGER_PRESS], finger_budget_s, should_cancel=should_cancel)
         if fp is None:
             eh.set_event_mask([])
             return None
+        if time.time() - t0 < self.STALE_PRESS_S:
+            #Stale/held finger at arm time -> demand a deliberate lift + fresh press so the
+            #captured frame is good (prevents rapid stale no-match strikes on the lock screen).
+            logging.log(tudor.LOG_INFO, "  finger already present at arm; waiting for lift + fresh press")
+            self._poll_event(eh, [SensorEventType.FINGER_REMOVE], self.DEBOUNCE_REMOVE_S, should_cancel=should_cancel)
+            fp = self._poll_event(eh, [SensorEventType.FINGER_PRESS], finger_budget_s, should_cancel=should_cancel)
+            if fp is None:
+                eh.set_event_mask([])
+                return None
         self._send_checked(LED_EX2_CFG, 2)
         eh.set_event_mask([SensorEventType.EVENT10])          # arm frame-ready (bit 24 / DRDY)
         self._send_checked(FRAME_ACQ_17B, 2)

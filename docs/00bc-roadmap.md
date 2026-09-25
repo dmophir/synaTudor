@@ -58,7 +58,7 @@ FORMAT `0x3f`/`0xa5`, poke `0x8`). A killed capture can wedge the sensor (GET_VE
   (`MATCHER_NO_MATCH_STATUSES`); restaged so fprintd/PAM get it. 2nd enroll reclaimed a
   tombstone slot (no exhaustion). Details: porting log "A2: multi-finger 1:N identify".
 
-### A3. Console / display-manager login PAM
+### A3. Console / display-manager login PAM — DONE (2026-09-25)
 - **Why:** only `sudo` is wired + tested. Real login is the headline use case.
 - **Do:** add `auth sufficient pam_fprintd.so` near the top of the `auth` stack of the
   target service — `/etc/pam.d/system-local-login` (getty/console) and/or the DM
@@ -67,6 +67,19 @@ FORMAT `0x3f`/`0xa5`, poke `0x8`). A killed capture can wedge the sensor (GET_VE
 - **Files:** system PAM (not in-repo); document in `libfprint-tod/PAM.md`.
 - **Watch:** don't lock yourself out; `sufficient` + password fallback is safe. Note the
   fprintd/logind interaction on the greeter. Effort: ~30 min.
+- **RESULT (DONE + real fix):** GDM/GNOME graphical login needed **no** PAM edit —
+  `/etc/pam.d/gdm-fingerprint` already wires `pam_fprintd` and GDM runs it as its own path.
+  Testing exposed the real blocker: the GNOME lock screen fires **3 identify attempts in
+  ~1.5s** and our driver re-captured the *still-present static finger* on each rapid re-arm
+  → stale no-match ×3 → password ("rapid fail-out"). **Fixed** with a debounce in
+  `pydrv/tudor/sensor/moc.py` `capture_one_frame` (a press within 0.4s of arming ⇒ finger
+  already down ⇒ wait for lift + fresh press). Validated: lock screen now unlocks via
+  fingerprint (verify-match, scores 0x595/0x6a2). Console/TTY enabled via `/etc/pam.d/login`
+  (`sufficient` + password fallback); documented the inherent pam_fprintd/TTY cleartext
+  quirk. Details: porting log "A3: graphical + console login PAM". New read-only diag:
+  `diag/finger_present_probe.py`. Follow-up candidates: tune debounce thresholds; a proper
+  finger-present/level detection would also fix a finger held from before arming (edge-only
+  today).
 
 ### A4. Reboot persistence + autoload
 - **Why:** confirm an enrolled finger survives a reboot with no manual steps.
