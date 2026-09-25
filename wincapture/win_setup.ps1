@@ -1,11 +1,26 @@
 <#  syna Windows OpenSSH setup  --  run in an ADMINISTRATOR PowerShell:
-        powershell -ExecutionPolicy Bypass -File .\win_setup.ps1
+        powershell -ExecutionPolicy Bypass -File .\win_setup.ps1 -PubKeyPath .\id_ed25519.pub
     Installs OpenSSH Server (standalone MSI first, to bypass the WSUS/Features-on-Demand
     error 0x80240069; falls back to the in-box feature pointed straight at Windows
-    Update), authorizes Dylan's Mac SSH key, lands SSH sessions in PowerShell, and opens
-    the firewall. At the end it prints USERNAME + IP -- send those two to Dylan. #>
+    Update), authorizes the SSH public key you pass via -PubKeyPath, lands SSH sessions in
+    PowerShell, and opens the firewall. At the end it prints USERNAME + IP -- send those
+    two to whoever will SSH in. #>
+
+param(
+    [Parameter(Mandatory = $true, HelpMessage = 'Path to the SSH public key file to authorize')]
+    [string]$PubKeyPath
+)
 
 $ErrorActionPreference = 'Continue'
+
+# Read + validate the public key up front (fail fast before touching the system).
+if (-not (Test-Path -LiteralPath $PubKeyPath)) { Write-Error "Public key not found: $PubKeyPath"; exit 1 }
+$key = (Get-Content -LiteralPath $PubKeyPath -Raw).Trim()
+if ([string]::IsNullOrWhiteSpace($key)) { Write-Error "Public key file is empty: $PubKeyPath"; exit 1 }
+if ($key -notmatch '^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-\S+|sk-ssh-\S+|sk-ecdsa-\S+)\s') {
+    Write-Error "File does not look like an SSH public key: $PubKeyPath"; exit 1
+}
+
 Write-Host '=== syna win setup: installing OpenSSH Server ==='
 
 function Have-Sshd { [bool](Get-Service sshd -ErrorAction SilentlyContinue) }
@@ -40,7 +55,6 @@ if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction Silentl
 }
 
 New-Item -ItemType Directory -Force -Path "$env:ProgramData\ssh" | Out-Null
-$key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIN/vLs7YyXLZ9MjduqRKirv0u+asiGTq7GQDFbGSzEH dylan.ophir@toasttab.com'
 $akf = "$env:ProgramData\ssh\administrators_authorized_keys"
 if (-not (Test-Path $akf) -or -not (Select-String -Path $akf -SimpleMatch $key -Quiet)) {
     Add-Content -Force -Path $akf -Value $key
