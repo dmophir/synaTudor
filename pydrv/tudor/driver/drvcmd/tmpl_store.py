@@ -6,6 +6,8 @@ import time
 import hashlib
 import struct
 
+from tudor.paths import write_dir, find_existing
+
 #Host-side template registry. The sensor matches on-chip and, on a successful verify,
 #returns the matched template's 16-byte TUID -- but not a human-meaningful identity. This
 #store persists the mapping label <-> TUID (plus the user-id blob we committed) so the
@@ -13,11 +15,11 @@ import struct
 #(c) enumerate/delete by label. It is host state only; the sensor's DB2 objects remain
 #authoritative for what is actually enrolled.
 #
-#File: /etc/tudor/<sensor-id>.templates.json (0600). Schema:
+#File: <state-dir>/<sensor-id>.templates.json (0600), where <state-dir> is resolved by
+#tudor.paths (TUDOR_STATE_DIR / $XDG_CONFIG_HOME/tudor / /etc/tudor). Schema:
 #  {"version":1, "sensor_id":"<hex>", "templates": {
 #      "<tuid_hex>": {"label":..., "user_id":"<hex>", "identity_type":int, "enrolled_at":epoch}}}
 
-STORE_DIR = "/etc/tudor"
 STORE_VERSION = 1
 
 
@@ -28,8 +30,16 @@ class TemplateStore:
         self.load()
 
     @property
+    def filename(self):
+        return "%s.templates.json" % self.sensor_id
+
+    @property
     def path(self):
-        return os.path.join(STORE_DIR, "%s.templates.json" % self.sensor_id)
+        #For reads: an existing store anywhere in the candidate dirs shadows the default.
+        existing = find_existing(self.filename)
+        if existing is not None:
+            return existing
+        return os.path.join(write_dir(), self.filename)
 
     def load(self):
         self.templates = {}
@@ -45,14 +55,19 @@ class TemplateStore:
             self.templates = {}
 
     def save(self):
-        if not os.path.exists(STORE_DIR):
-            os.makedirs(STORE_DIR)
-            os.chmod(STORE_DIR, 0o700)
-        tmp = self.path + ".tmp"
+        #Write into an existing store's directory if one exists, else the best writable
+        #state dir (per-user unless overridden / running as root).
+        existing = find_existing(self.filename)
+        target_dir = os.path.dirname(existing) if existing is not None else write_dir()
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir)
+            os.chmod(target_dir, 0o700)
+        target = os.path.join(target_dir, self.filename)
+        tmp = target + ".tmp"
         with open(tmp, "w") as f:
             json.dump({"version": STORE_VERSION, "sensor_id": self.sensor_id, "templates": self.templates}, f, indent=2)
         os.chmod(tmp, 0o600)
-        os.replace(tmp, self.path)
+        os.replace(tmp, target)
 
     #--- mutation ---
 

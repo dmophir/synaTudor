@@ -19,8 +19,9 @@ import tudor
 from tudor.comm import USBCommunication, LogCommunicationProxy
 from tudor.sensor import Sensor, SensorPairingData, SensorDB2, SensorMatcher, DB2_CAT_TEMPLATE
 
+from tudor.paths import resolve_pdata
 PID = 0x00BC
-PDATA = "/etc/tudor/22eb371d62990000.pdata"
+PDATA = resolve_pdata("22eb371d62990000")
 
 
 def main():

@@ -756,6 +756,63 @@ detail in [`frame-capture-re.md`](frame-capture-re.md) → "POLISH/INTEGRATION R
   backed by pydrv's `SensorMatcher` or native C) is the path to fprintd/PAM. To be scoped
   in a dedicated session.
 
+### 2026-09-24 — libfprint MOC DRIVER + fprintd + PAM: DONE (item (c))
+Built a new **`FpDevice`-based** out-of-tree TOD driver (`libfprint-tod/`) and validated the
+whole stack on `06cb:00bc`: `fprintd-enroll` → `fprintd-verify` (match / no-match, no false
+prune) → `sudo` fingerprint login. Enrolled finger authenticates `sudo` with **no password**;
+a non-enrolled finger yields `pam_fprintd` retries then password fallback. Everything runs
+under fprintd's hardened service sandbox (`ProtectHome`/`ProtectSystem=strict`/
+`MemoryDenyWriteExecute`/`SystemCallFilter=@system-service`).
+
+**Architecture.** The `.so` embeds CPython (one interpreter, no sub-interpreters — extension
+safe) and drives the validated pydrv `SensorMatcher`/`SensorDB2` over the existing TLS 1.2
+channel. Each op runs on a per-op **worker `GThread`**; progress / finger-status / completion
+are marshalled to fprintd's `GMainContext` via `g_idle` so every `fpi_device_*` call is on the
+main thread. Cancellation is cooperative (a wrapper flag the pydrv capture poll-loop checks).
+Files: `src/{tudor-moc.h,pyembed.c/h,device.c}`, `meson.build`, `60-tudor-moc.rules`,
+`install-dev.sh`, `tools/moc_selftest.c`, `README.md`, `PAM.md`. Backend chosen: **embed
+pydrv** (fast path to a working login) over a native C TLS/MOC reimpl. Stack: **AUR
+`libfprint-tod` 1.95.2+tod1** (provides `libfprint-2-tod-1.pc` + `tod_driversdir`) +
+`fprintd` from extra. Stock Arch `libfprint` has **no** TOD.
+
+**Five things that bit us (all fixed):**
+1. **TOD loader only loads `lib*.so`** (`tod-shared-loader.c:83` `g_str_has_prefix(basename,"lib")`).
+   A `tudor_moc_tod.so` was silently skipped → `meson name_prefix:'lib'` → `libtudor_moc_tod.so`.
+2. **Loader `dlopen`s modules `RTLD_LOCAL`**, so libpython's symbols weren't global and Python's
+   own C-extensions failed (`array…so: undefined symbol: PyUnicode_FromFormat`). Fix:
+   `dlopen("libpython3.14.so.1.0", RTLD_GLOBAL|RTLD_NOLOAD)` before `Py_InitializeEx` (promotes
+   the already-mapped libpython to the global scope). Do **not** `Py_Finalize` (fragile with
+   pyusb/cryptography loaded); fprintd is long-lived.
+3. **Adaptive template update rewrites the on-chip TEMPLATE tuid.** After a matching verify
+   (`templateUpdate=1`), the sensor replaces the template under a **new tuid** (DB2 shows
+   `templates=1/N-deleted/0`). The template tuid is therefore NOT a stable host key. **Key
+   FpPrints by the parent USER uid** (verified stable across updates) and, at verify time,
+   resolve the user's *current* templates and restrict `identify` (0x99, `nTemplates≥1`) to
+   them — this both fixes 1:1 verify and prevents matching a sibling template.
+4. **fprintd prunes any stored print `list` doesn't return an `fp_print_equal` match for.**
+   `fp_print_equal` on RAW prints compares the **entire fpi-data GVariant**. Since the on-chip
+   WINBIO user-id string isn't host-readable, `list` can't reproduce it → make **fpi-data the
+   16-byte user key ONLY** (no finger/user-id in the variant) so enrolled and listed prints
+   compare equal. (Symptom before the fix: `Deleted stored finger 7 … unknown to device`.)
+5. **capture and identify must be one pydrv call.** Splitting them across two GIL round-trips
+   let the on-chip frame go stale → `0x050b`. Combined into single `verify_once`/`enroll_step`
+   wrapper calls (mirroring `SensorMatcher.verify`/`enroll_loop`).
+
+**Robustness / access.** `open` self-heals a half-open TLS wedge (plaintext GET_VERSION →
+`15 03 03…` alert, seen after fprintd was restarted mid-session): USB reset + ~2 s idle +
+retry ×3. Non-root/dev access: new `tudor/paths.py` resolves state dir via
+`$TUDOR_STATE_DIR` → `$XDG_CONFIG_HOME/tudor` → `/etc/tudor` (wired into `tmpl_store.py` +
+`diag/*`); udev `TAG+="uaccess"` grants the seat user rw on `06cb:00bc`/`00a9`; pydrv is
+staged to `/usr/lib/tudor-moc/pydrv` because fprintd runs `ProtectHome=true`. pydrv additions:
+`SensorDB2.delete_template` (template + empty-parent-user prune via validated `0xa3`),
+`CaptureCancelled` + `should_cancel` hooks in `capture_one_frame`/`enroll_loop`/`verify`.
+
+**Follow-ups (minor):** deleted-template tombstones accumulate (`templates=n/deleted/0` avail);
+if a template-slot limit is ever hit, add `DB2_CLEANUP 0xa4` (wire not yet RE'd) — for now
+delete works and slot reuse has not blocked enroll. `clear_storage` leaves empty DB2 user
+slots (prune them). Validate `suspend`/`resume` across a real system suspend (currently
+no-ops). Consider a proper packaged pydrv install instead of the `/usr/lib/tudor-moc` stage.
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229

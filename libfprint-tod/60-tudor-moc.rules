@@ -1,0 +1,10 @@
+# Synaptics Tudor Match-on-Chip (Augusta) fingerprint sensors.
+# Grants the active seat user read/write on the USB device (via logind uaccess) so the
+# pydrv driver / diagnostics work without root, and tags the device for the libfprint
+# TOD driver. Covers 06cb:00bc (Latitude 7210 2-in-1) and the sibling 06cb:00a9.
+#
+# Install: sudo install -m644 60-tudor-moc.rules /etc/udev/rules.d/ && \
+#          sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=usb
+
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="06cb", ATTR{idProduct}=="00bc", TAG+="uaccess", MODE="0660", ENV{LIBFPRINT_DRIVER}="Synaptics Tudor MOC"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="06cb", ATTR{idProduct}=="00a9", TAG+="uaccess", MODE="0660", ENV{LIBFPRINT_DRIVER}="Synaptics Tudor MOC"

@@ -22,7 +22,8 @@ from tudor.comm import USBCommunication, LogCommunicationProxy
 from tudor.sensor import Sensor, SensorPairingData, SensorEventType
 
 PID = 0x00BC
-PDATA = "/etc/tudor/22eb371d62990000.pdata"
+from tudor.paths import resolve_pdata
+PDATA = resolve_pdata("22eb371d62990000")
 DURATION = 40
 
 

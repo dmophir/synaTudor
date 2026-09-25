@@ -23,7 +23,8 @@ from tudor.comm import USBCommunication, LogCommunicationProxy, SUCCESS_STATUS
 from tudor.sensor import Sensor, SensorPairingData, SensorDB2, DB2_CAT_USER, DB2_CAT_TEMPLATE, DB2_CAT_PAYLOAD
 
 PID = 0x00BC
-PDATA = "/etc/tudor/22eb371d62990000.pdata"
+from tudor.paths import resolve_pdata
+PDATA = resolve_pdata("22eb371d62990000")
 
 
 def hexdump(b, n=96):

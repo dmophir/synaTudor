@@ -1,0 +1,2 @@
+option('pydrv_path', type : 'string', value : '',
+  description : 'Directory containing the pydrv `tudor` package (baked into the module as the default sys.path entry; empty = use ../pydrv relative to the source tree). Overridable at runtime via $TUDOR_PYDRV_PATH.')

@@ -8,7 +8,7 @@ This is a fork of `Popax21/synaTudor` being used to bring the Synaptics
 companion [`docs/frame-capture-re.md`](docs/frame-capture-re.md) (detailed,
 independently-validated binary RE of the capture protocol). Keep both up to date.
 
-## Current status (2026-09-22)
+## Current status (2026-09-24)
 - **DONE:** Linux OWNS the sensor — pairing + TLS 1.2 + encrypted command channel
   all work on `06cb:00bc` (Augusta, fw 10.1). Windows fingerprint enrollment is
   now BROKEN (expected; recoverable via Windows re-enroll).
@@ -68,13 +68,35 @@ independently-validated binary RE of the capture protocol). Keep both up to date
   new DB2 template+user → verify matches + maps to label → delete removes it. (d) capture
   constants tidied in `moc.py` (byte-identical). Detail: `docs/frame-capture-re.md` →
   "POLISH/INTEGRATION RE + ON-DEVICE (2026-09-22, session 2)".
-- **NEXT — (c) libfprint MOC driver (scope separately):** the in-tree `tudor.c` is an
-  `FpImageDevice` (host-capture + host-match) — wrong base class for match-on-chip. Build a
-  new `FpDevice`-based MOC driver (mirror `goodixmoc`: enroll/verify/identify/list/delete/
-  clear-storage vfuncs, backed by pydrv's `SensorMatcher` or native C), add `06cb:00bc`(+`00a9`)
-  to the id_table, package as a TOD module + udev + fprintd + PAM. Minor follow-ups: prune
-  orphaned DB2 user slots (CLEANUP `0xa4`) after template delete; optional `--pid 0x00bc`
-  default in `tudor.driver`.
+- **DONE — (c) libfprint MOC driver + fprintd + PAM (2026-09-24):** new `FpDevice`-based TOD
+  driver in `libfprint-tod/` works end-to-end on `06cb:00bc`. **`fprintd-enroll`/`-verify`
+  and `sudo` fingerprint login all validated on-device** (enrolled finger → sudo w/o password;
+  non-enrolled → `pam_fprintd` retries then password fallback). Driver embeds CPython + drives
+  pydrv `SensorMatcher`/`SensorDB2` over TLS on a per-op worker GThread, marshalling
+  progress/finger-status/results back to fprintd's main loop via `g_idle`; vfuncs
+  probe/open/close/enroll/verify/identify/list/delete/clear_storage/cancel/suspend/resume.
+  **Stack:** AUR `libfprint-tod` (1.95.2+tod1, provides TOD `tod_driversdir`) + `fprintd`.
+  **Four non-obvious gotchas solved:** (1) TOD loader only scans modules whose basename
+  starts with `lib` (`tod-shared-loader.c:83`) → `name_prefix:'lib'`. (2) loader `dlopen`s
+  RTLD_LOCAL, so libpython symbols weren't global → Python ext modules failed
+  (`undefined symbol: PyUnicode_FromFormat`); fix = `dlopen(libpython, RTLD_GLOBAL)` before
+  `Py_Initialize`. (3) **on-chip TEMPLATE tuid is rewritten by adaptive update** after a
+  match (`templateUpdate=1`) → the volatile tuid is NOT a stable host key; **key FpPrints by
+  the parent USER uid** (stable across updates) and resolve the user's *current* templates at
+  verify time (identify restricted to that user's tuids = correct 1:1). (4) fprintd prunes a
+  stored print unless `list` returns an `fp_print_equal` match → **fpi-data must be the
+  key ONLY** (16-byte user uid), not `(finger,tuid,user_id)`, since the on-chip user-id string
+  isn't host-readable. Also: capture+identify must be one pydrv call (split calls returned
+  `0x050b`); `open` self-heals a half-open TLS wedge (`15 03 03` alert) via USB reset+idle+retry.
+  **State/access for non-root:** `tudor/paths.py` resolver (`$TUDOR_STATE_DIR`/`$XDG_CONFIG_HOME`
+  /`/etc/tudor`); udev `TAG+=uaccess` for `06cb:00bc`/`00a9`; pydrv staged to `/usr/lib/tudor-moc/pydrv`
+  (fprintd runs `ProtectHome`). Build/install/PAM: `libfprint-tod/{README,PAM}.md` +
+  `install-dev.sh`; self-test harness `libfprint-tod/tools/moc_selftest.c`. Detail:
+  `docs/00bc-porting.md` → "libfprint MOC DRIVER (2026-09-24)".
+- **Follow-ups (minor):** DB2 accumulates deleted-template tombstones (`templates=n/deleted/0`
+  avail); add `DB2_CLEANUP 0xa4` (wire not yet RE'd) if a template-slot limit is ever hit;
+  `clear_storage` leaves empty DB2 user slots (prune them); validate suspend/resume across a
+  real system suspend; optional `--pid 0x00bc` default in `tudor.driver`.
 - **Binary RE:** use the local **`re`** subagent (`.opencode/agent/re.md`, Opus,
   gitignored). Both adapter DLLs (`synaFpAdapter103/104.dll`) + USB DLLs + r2 seed
   dumps are now staged in the sandbox `re-frameacq/`.

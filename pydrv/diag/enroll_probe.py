@@ -26,7 +26,8 @@ from tudor.comm import USBCommunication, LogCommunicationProxy, SUCCESS_STATUS
 from tudor.sensor import Sensor, SensorPairingData, SensorDB2, SensorMatcher, DB2_CAT_TEMPLATE
 
 PID = 0x00BC
-PDATA = "/etc/tudor/22eb371d62990000.pdata"
+from tudor.paths import resolve_pdata
+PDATA = resolve_pdata("22eb371d62990000")
 OUT = "/root/synatudor/phaseC/enroll"
 MAX_IMAGES = 25
 PER_IMAGE_BUDGET = 45

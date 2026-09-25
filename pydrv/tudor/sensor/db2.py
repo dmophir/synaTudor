@@ -117,6 +117,31 @@ class SensorDB2:
         deleted = struct.unpack_from("<H", resp, 2)[0] if len(resp) >= 4 else None
         return status, deleted
 
+    def delete_template(self, tuid : bytes, prune_empty_user : bool = True):
+        """Deletes an enrolled template by TUID (category 2), and -- if prune_empty_user --
+        also removes the parent user object once it has no remaining templates, so we don't
+        leak DB2 user slots on repeated enroll/delete cycles. Uses only the validated
+        0xa3 DELETE_OBJECT framing (same builder for user/template categories); this is the
+        safe, RE-grounded alternative to the (still unpinned) 0xa4 CLEANUP compaction op.
+        Returns (tmpl_status, tmpl_deleted, pruned_user_uid_or_None). NOT a format."""
+        assert len(tuid) == 16
+        #Locate the parent user (needed both to prune and because listing is per-user).
+        parent = None
+        for user_uid, t in self.iter_templates():
+            if t == tuid:
+                parent = user_uid
+                break
+        tmpl_status, tmpl_deleted = self.delete_object(DB2_CAT_TEMPLATE, tuid)
+        pruned = None
+        if prune_empty_user and parent is not None:
+            try:
+                if len(self.list_templates(parent)) == 0:
+                    self.delete_object(DB2_CAT_USER, parent)
+                    pruned = parent
+            except tudor.CommandFailedException as e:
+                logging.log(tudor.LOG_WARN, "delete_template: parent-user prune failed status=0x%04x" % e.status)
+        return tmpl_status, tmpl_deleted, pruned
+
     def get_object_info(self, category : int, uid : bytes):
         assert len(uid) == 16
         req = struct.pack("<BB", tudor.Command.DB2_GET_OBJ_INFO, category) + bytes(3) + uid

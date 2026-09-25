@@ -22,7 +22,8 @@ from tudor.sensor import Sensor, SensorPairingData, SensorDB2, DB2_CAT_TEMPLATE
 from tudor.driver.drvcmd.tmpl_store import TemplateStore
 
 PID = 0x00BC
-PDATA = "/etc/tudor/22eb371d62990000.pdata"
+from tudor.paths import resolve_pdata
+PDATA = resolve_pdata("22eb371d62990000")
 
 
 def show(db2, store):

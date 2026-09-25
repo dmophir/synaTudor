@@ -30,6 +30,12 @@ ENROLL_RES_MORE = 305   # 0x131 more images needed
 ENROLL_RES_FAIL = 304   # 0x130 failed / fixed-pattern
 MATCHER_NO_MATCH = 0x0509   # verify/identify reply status when no template matched
 
+class CaptureCancelled(Exception):
+    """Raised out of the capture/enroll poll loops when a caller-supplied should_cancel()
+    returns True (e.g. libfprint asked us to cancel the current operation). Lets the driver
+    unwind cleanly and release the on-chip session instead of blocking on finger events."""
+    pass
+
 #--- Per-image capture recipe, byte-for-byte from the Windows enroll capture (2026-09-22).
 #These are Augusta-generic fixed captured values (validated on our 06cb:00bc). They arm the
 #on-chip frame capture that precedes each add_image; the host receives no pixels.
@@ -186,11 +192,14 @@ class SensorMatcher:
         #raw=False so a non-success status raises (arm commands are expected to succeed).
         return self.sensor.comm.send_command(req, resp_size, timeout)
 
-    def _poll_event(self, eh, want_types, budget_s : float):
+    def _poll_event(self, eh, want_types, budget_s : float, should_cancel=None):
         #Non-blocking poll of EVENT_READ (0x87) until an event in want_types shows up, or
-        #timeout. Avoids the event handler's infinite interrupt-EP block.
+        #timeout. Avoids the event handler's infinite interrupt-EP block. If should_cancel is
+        #given and returns True, aborts by raising CaptureCancelled (checked each iteration).
         deadline = time.time() + budget_s
         while time.time() < deadline:
+            if should_cancel is not None and should_cancel():
+                raise CaptureCancelled()
             try:
                 eh.read_events(block=False)
             except Exception as e:
@@ -202,34 +211,34 @@ class SensorMatcher:
             time.sleep(0.05)
         return None
 
-    def capture_one_frame(self, finger_budget_s : float = 30, frame_budget_s : float = 8):
+    def capture_one_frame(self, finger_budget_s : float = 30, frame_budget_s : float = 8, should_cancel=None):
         #Captured Windows recipe: wait FINGER_PRESS -> LED_EX2 cfg -> arm frame event +
         #FRAME_ACQ(17B) -> wait frame-ready (EVENT10=24) -> LED_EX2 cfg -> FRAME_FINISH.
         #Leaves a captured frame on-chip for add_image. Returns the finger event, or None
-        #if no finger arrived within finger_budget_s.
+        #if no finger arrived within finger_budget_s. Raises CaptureCancelled if cancelled.
         eh = self.sensor.event_handler
         eh.set_event_mask([SensorEventType.FINGER_PRESS, SensorEventType.FINGER_REMOVE])
-        fp = self._poll_event(eh, [SensorEventType.FINGER_PRESS], finger_budget_s)
+        fp = self._poll_event(eh, [SensorEventType.FINGER_PRESS], finger_budget_s, should_cancel=should_cancel)
         if fp is None:
             eh.set_event_mask([])
             return None
         self._send_checked(LED_EX2_CFG, 2)
         eh.set_event_mask([SensorEventType.EVENT10])          # arm frame-ready (bit 24 / DRDY)
         self._send_checked(FRAME_ACQ_17B, 2)
-        fr = self._poll_event(eh, [SensorEventType.EVENT10], frame_budget_s)
+        fr = self._poll_event(eh, [SensorEventType.EVENT10], frame_budget_s, should_cancel=should_cancel)
         logging.log(tudor.LOG_INFO, "  finger pressed; frame-ready=%s" % ("yes" if fr else "NO"))
         self._send_checked(LED_EX2_CFG, 2)
         self._send_checked(FRAME_FINISH, 2)
         eh.set_event_mask([])
         return fp
 
-    def enroll_loop(self, max_images : int = 25, finger_budget_s : float = 30, on_progress=None):
+    def enroll_loop(self, max_images : int = 25, finger_budget_s : float = 30, on_progress=None, should_cancel=None):
         #Runs enroll_start then [capture_one_frame -> add_image] until progress==100.
         #Returns (final EnrollStat, tuid). Does NOT commit (caller decides).
         self.enroll_start()
         tuid = None
         for i in range(max_images):
-            ev = self.capture_one_frame(finger_budget_s=finger_budget_s)
+            ev = self.capture_one_frame(finger_budget_s=finger_budget_s, should_cancel=should_cancel)
             if ev is None:
                 raise TimeoutError("no finger press on image %d" % (i + 1))
             stat, t = self.enroll_add_image()
@@ -263,10 +272,10 @@ class SensorMatcher:
         mr.matched_tuid = matched_tuid
         return mr
 
-    def verify(self, finger_budget_s : float = 30):
+    def verify(self, finger_budget_s : float = 30, should_cancel=None):
         #Capture one frame (same arm as enroll) then identify against all on-chip templates.
-        #Returns MatchResult (on match) or None (no match / no finger).
-        ev = self.capture_one_frame(finger_budget_s=finger_budget_s)
+        #Returns MatchResult (on match) or None (no match / no finger). Raises CaptureCancelled.
+        ev = self.capture_one_frame(finger_budget_s=finger_budget_s, should_cancel=should_cancel)
         if ev is None:
             return None
         return self.identify()
