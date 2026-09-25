@@ -16,11 +16,15 @@
  * progress are marshalled back to fprintd's GMainContext via g_idle so that every
  * fpi_device_* call happens on the main thread.
  *
- * FpPrint <-> on-chip template mapping: the FpPrint "fpi-data" GVariant is
- *   (y @ay @ay) = (finger_index, tuid[16], user_id)
- * mirroring goodixmoc. The 16-byte TUID is the sensor-assigned template id returned by
- * the final enroll add_image; verify/identify resolve the matched TUID back to the
- * stored FpPrint. The sensor's DB2 store is authoritative for what is enrolled.
+ * FpPrint <-> on-chip template mapping: the FpPrint "fpi-data" GVariant is JUST the
+ * 16-byte stable parent-USER uid ("ay") -- NOT the template tuid, and NOT the old
+ * (y @ay @ay) tuple. The on-chip template tuid churns via the adaptive update after a
+ * matching verify, and the WINBIO user-id is not host-readable, so neither can be a
+ * stable/reproducible host key. Keying on the user uid makes an enrolled print and its
+ * `list` counterpart compare equal (fp_print_equal over the whole variant) so fprintd
+ * does not prune it. verify/identify resolve the matched template back to its parent
+ * user; the sensor's DB2 store is authoritative for what is enrolled. See device.c
+ * (tudor_print_data / tudor_print_get_tuid) for the implementation.
  */
 
 #define TUDOR_MOC_VID 0x06cb

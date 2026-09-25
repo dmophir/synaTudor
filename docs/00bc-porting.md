@@ -813,6 +813,37 @@ delete works and slot reuse has not blocked enroll. `clear_storage` leaves empty
 slots (prune them). Validate `suspend`/`resume` across a real system suspend (currently
 no-ops). Consider a proper packaged pydrv install instead of the `/usr/lib/tudor-moc` stage.
 
+### 2026-09-24 — A1: `fprintd-delete` validated end-to-end (PASS)
+Roadmap item **A1** done. The `fprintd-delete` → `dev_delete` → `pyembed_delete_template`
+→ `SensorDB2.delete_template` path had only been exercised via the harness / raw pydrv;
+now confirmed through the real fprintd D-Bus daemon on `06cb:00bc`. Ran entirely as user
+`dylan` (no `sudo`) using the per-user pairing copy at `~/.config/tudor/22eb371d62990000.pdata`.
+- **Baseline:** fprintd listed one `right-index-finger` (enrolled a prior session, i.e. the
+  FpPrint had been serialized to disk and reloaded — a strong test of the key round-trip).
+  On-chip `DB2Info: users=1/6/120, templates=1/10/0, payloads=1/6/18`; user
+  `26b2311ac97f03e7cb14d117a17b1537`, template `af6faabbbffc93792b72f1d63725373e`
+  (`diag/db2_list_probe.py`, read-only).
+- **`fprintd-delete dylan` → OK.** Verified three independent ways: (1) `fprintd-list dylan`
+  → "no fingers enrolled" (so fprintd also dropped its `/var/lib/fprint` entry); (2)
+  `moc_selftest list` → 0; (3) on-chip `DB2Info: users=0/7/120, templates=0/11/0,
+  payloads=0/7/18` — current user **and** template gone, deleted-counts each +1, and the
+  **payload was cascaded** too. So `dev_delete` correctly pulled the 16-byte parent-user key
+  out of the on-disk FpPrint's fpi-data, deleted the template, and pruned the now-empty
+  parent-user object (no orphan user slot leaked).
+- **Restore:** re-enrolled `right-index-finger` via `fprintd-enroll` (8 stages → completed).
+  Fresh UIDs (user `ff3fe9695cbdaee369b4541259f52ddd`, template `7faefdf1bdb193cfbf4983fc09b4f3f2`),
+  distinct from the deleted ones ⇒ clean new enrollment; `sudo`/PAM fingerprint still works.
+- **Fixed two stale bits found while here** (no driver behaviour change): `moc_selftest.c`
+  `print_tuid` still parsed the old `(y @ay @ay)` fpi-data and printed `(no tuid)` — updated
+  to read the key-only `ay` and print `userkey=…` (now shows `ff3fe969…`, matching the probe);
+  and the `tudor-moc.h` header comment still described fpi-data as the `(y @ay @ay)` tuple —
+  corrected to the key-only reality (`device.c` was already accurate).
+- **Env note (bit us once):** `pam_fprintd` is wired `sufficient` into `/etc/pam.d/sudo`, so
+  **any `sudo` now blocks ~30 s on a fingerprint prompt** (then falls back to password — which
+  fails with no TTY/askpass). A1's whole flow (list/enroll/delete/probe) runs as `dylan`
+  without `sudo`, so this only matters for the debug path (`systemctl edit fprintd`). Prefer
+  the per-user pdata + non-`sudo` tools.
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229

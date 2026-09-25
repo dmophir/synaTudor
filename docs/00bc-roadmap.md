@@ -21,7 +21,7 @@ FORMAT `0x3f`/`0xa5`, poke `0x8`). A killed capture can wedge the sensor (GET_VE
 
 ## A. Functional validation gaps (highest value, low effort)
 
-### A1. Validate `fprintd-delete` end-to-end
+### A1. Validate `fprintd-delete` end-to-end — DONE (2026-09-24)
 - **Why:** the `dev_delete` vfunc → `pyembed_delete_template` → user-keyed
   `SensorDB2.delete_template` path was only exercised via the harness / raw pydrv this
   session, not through `fprintd-delete`.
@@ -31,6 +31,14 @@ FORMAT `0x3f`/`0xa5`, poke `0x8`). A killed capture can wedge the sensor (GET_VE
   `src/pyembed.c` wrapper `delete_template`.
 - **Watch:** the print handed to `dev_delete` must carry the 16-byte user key in fpi-data
   (it does, from enroll). Effort: ~15 min + a few presses.
+- **RESULT (PASS):** deleted a print that had been serialized to disk in a *prior* session
+  (stronger than a same-session enroll→delete). All three views agreed: `fprintd-list` →
+  none; `moc_selftest list` → 0; on-chip `DB2Info` current user/template/payload all → 0
+  (deleted-counts +1). Parent-user object pruned (no orphan slot). Re-enrolled to restore.
+  Ran fully as `dylan` (no `sudo`) via the per-user pdata copy. Details: porting log
+  "A1: `fprintd-delete` validated end-to-end". Also fixed two stale comments inline while
+  here (harness `print_tuid` + `tudor-moc.h` fpi-data description now match the key-only
+  `ay` format).
 
 ### A2. Multi-finger 1:N identify
 - **Why:** the gallery→user resolution (`verify_once` with N user keys, matched template →

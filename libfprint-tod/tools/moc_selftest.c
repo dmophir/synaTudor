@@ -26,16 +26,17 @@ static void enroll_progress(FpDevice *dev, gint completed, FpPrint *print, gpoin
 }
 
 static void print_tuid(FpPrint *p) {
+  /* fpi-data is the 16-byte stable USER key only ("ay"), not the old (y@ay@ay) tuple:
+   * the on-chip WINBIO user-id is not host-readable and the template tuid churns via the
+   * adaptive update, so the driver keys prints on the parent-user uid (see device.c). */
   g_autoptr(GVariant) data = NULL;
   g_object_get(p, "fpi-data", &data, NULL);
-  if (!data || !g_variant_check_format_string(data, "(y@ay@ay)", FALSE)) { g_printerr("  (no tuid)\n"); return; }
-  guint8 finger; GVariant *vt=NULL,*vu=NULL; gsize tl=0;
-  g_variant_get(data, "(y@ay@ay)", &finger, &vt, &vu);
-  const guint8 *t = g_variant_get_fixed_array(vt, &tl, 1);
+  if (!data || !g_variant_is_of_type(data, G_VARIANT_TYPE("ay"))) { g_printerr("  (no key)\n"); return; }
+  gsize n = 0;
+  const guint8 *k = g_variant_get_fixed_array(data, &n, 1);
   g_autoptr(GString) s = g_string_new("");
-  for (gsize i=0;i<tl;i++) g_string_append_printf(s, "%02x", t[i]);
-  g_printerr("  tuid=%s finger=%d\n", s->str, finger);
-  g_variant_unref(vt); g_variant_unref(vu);
+  for (gsize i=0;i<n;i++) g_string_append_printf(s, "%02x", k[i]);
+  g_printerr("  userkey=%s\n", s->str);
 }
 
 int main(int argc, char **argv) {
