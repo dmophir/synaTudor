@@ -40,7 +40,7 @@ FORMAT `0x3f`/`0xa5`, poke `0x8`). A killed capture can wedge the sensor (GET_VE
   here (harness `print_tuid` + `tudor-moc.h` fpi-data description now match the key-only
   `ay` format).
 
-### A2. Multi-finger 1:N identify
+### A2. Multi-finger 1:N identify — DONE (2026-09-25)
 - **Why:** the gallery→user resolution (`verify_once` with N user keys, matched template →
   parent user) is implemented but only tested with a single enrolled template.
 - **Do:** enroll two different fingers (two fprintd prints / two DB2 users), then verify each
@@ -49,6 +49,14 @@ FORMAT `0x3f`/`0xa5`, poke `0x8`). A killed capture can wedge the sensor (GET_VE
 - **Files:** `src/pyembed.c` (`verify_once`, `_templates_by_user`), `src/device.c`
   (`idle_verify_done` gallery match, `collect_target_tuids`).
 - **Watch:** DB2 slot pressure if many enroll/delete cycles (see C1). Effort: ~30 min.
+- **RESULT (PASS + bug fix):** enrolled a 2nd finger (right-middle) → two DB2 users U1/U2;
+  1:N `identify-onchip` resolved finger#1→U1 and finger#2→U2 (distinct, correct, no
+  cross-match); `fprintd-verify -f` match/no-match confirmed the per-slot restriction
+  end-to-end. **Found + fixed a real bug:** an un-enrolled finger made the matcher return
+  `0x050b` (a no-match code distinct from `0x0509`) which `identify()` treated as a fatal
+  error → device error mid-auth. `moc.py` now maps `0x050b` to a clean no-match
+  (`MATCHER_NO_MATCH_STATUSES`); restaged so fprintd/PAM get it. 2nd enroll reclaimed a
+  tombstone slot (no exhaustion). Details: porting log "A2: multi-finger 1:N identify".
 
 ### A3. Console / display-manager login PAM
 - **Why:** only `sudo` is wired + tested. Real login is the headline use case.

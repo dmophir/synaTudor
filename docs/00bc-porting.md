@@ -844,6 +844,43 @@ now confirmed through the real fprintd D-Bus daemon on `06cb:00bc`. Ran entirely
   without `sudo`, so this only matters for the debug path (`systemctl edit fprintd`). Prefer
   the per-user pdata + non-`sudo` tools.
 
+### 2026-09-25 — A2: multi-finger 1:N identify (PASS) + `0x050b` no-match fix
+Roadmap item **A2** done, and it surfaced + fixed a real robustness bug. Started from the
+A1 end-state (1 print `right-index` → user **U1** `ff3fe9695cbdaee369b4541259f52ddd`).
+- **Enrolled a 2nd, physically-distinct finger** into the `right-middle` slot →
+  `fprintd-enroll -f right-middle-finger`. On-chip now **two users**: U1 + **U2**
+  `fdbb067b330836ba2916fc5c4fee00d0`, one template each (`users=2/7/118 templates=2/9/0`;
+  the 2nd enroll reclaimed a deleted-template tombstone, `deleted 10→9`, as predicted — no
+  slot exhaustion). (fprintd finger *labels* are the fixed 10-value `FpFinger` anatomical
+  enum, `fp-print.h:52`; they're just slot names — the sensor matches ridges, fully
+  finger-agnostic. Two prints need two labels; which physical finger goes in each is the
+  user's choice.)
+- **1:N discrimination (harness `identify-onchip`, gallery = both users):** pressing the
+  first-enrolled finger resolved to **U1** (matched template `7faefdf1…`, score 0x4fd,
+  `templateUpdate=1`); the second-enrolled finger resolved to **U2** (`67c1ea2d…`). Two
+  distinct fingers → two distinct, correct users ⇒ correct resolution, no cross-matching.
+- **BUG FOUND + FIXED — un-enrolled finger threw a hard error.** An un-enrolled finger made
+  the matcher (`0x99`) return **`0x050b`** (a matcher-band no-match verdict *distinct* from
+  the known `0x0509 MATCHER_MATCH_FAILED`), which `SensorMatcher.identify` treated as a
+  fatal `CommandFailedException` → surfaced to fprintd/PAM as a **device error mid-auth**
+  (a stranger's/your un-enrolled finger at a login prompt would fault, not "not
+  recognized"). Reproducible 2/2. **Fix:** `moc.py` now maps both `0x0509` and `0x050b` to
+  a clean no-match (`identify()` returns `None`) via `MATCHER_NO_MATCH_STATUSES`. After the
+  fix (and clearing a stale `__pycache__` the embedded interpreter had loaded), the
+  un-enrolled finger returns **NO MATCH** cleanly (both sub-codes handled identically). Note
+  `0x050b` was *also* seen once historically as a stale-frame symptom (split capture/identify),
+  but in the single-call path enrolled fingers match cleanly, so here it is the matcher's
+  no-match result, not staleness. Restaged via `install-dev.sh` (fprintd restarted; staged
+  `moc.py` verified) so real logins get the fix.
+- **Real fprintd path:** `fprintd-verify` (automatic, no `-f`) pins to a single slot
+  (it chose `right-middle`) rather than identify-across-all — a 1:1 verify. `fprintd-verify
+  -f right-middle-finger` + the matching finger → **verify-match**; a non-matching finger →
+  `verify-no-match`, confirming the per-slot restriction (anti-cross-match) end-to-end.
+  (Accept-any-enrolled-finger is the *identify* path — validated via the harness above and is
+  what `pam_fprintd` uses for login.)
+- **End state:** both fingers kept (U1, U2); sensor healthy. MOC is probabilistic — a couple
+  of presses were legitimate no-matches (wrong finger / weak press) and passed on retry.
+
 ## Key references
 - Level1Techs write-up (this tablet, by the maintainer):
   https://forum.level1techs.com/t/success-with-linux-on-x86-tablet-dell-latitude-7210/237229

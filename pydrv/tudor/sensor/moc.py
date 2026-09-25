@@ -29,6 +29,17 @@ QM_MATCH_RESULT_SIZE = 0x24  # 36
 ENROLL_RES_MORE = 305   # 0x131 more images needed
 ENROLL_RES_FAIL = 304   # 0x130 failed / fixed-pattern
 MATCHER_NO_MATCH = 0x0509   # verify/identify reply status when no template matched
+#0x050b: observed reproducibly on 06cb:00bc when an UN-ENROLLED finger is matched against an
+#explicit template gallery (identify with nTemplates>=1). It is a distinct matcher-band
+#"no candidate matched" verdict from 0x0509 (enrolled fingers return 0x0000; unknown ones
+#return 0x050b, 2/2). Treat both as a clean no-match so an unknown finger is a graceful
+#reject (None) instead of a hard CommandFailedException -- otherwise it surfaces to
+#fprintd/PAM as a device ERROR mid-auth (an unknown/stranger finger must be "not recognized",
+#not a fault). (0x050b was separately seen once as a stale-frame symptom when capture and
+#identify were split across calls; in the single-call path used here the frame is fresh, so
+#this is the matcher's no-match result, not staleness.)
+MATCHER_NO_MATCH_ALT = 0x050b
+MATCHER_NO_MATCH_STATUSES = (MATCHER_NO_MATCH, MATCHER_NO_MATCH_ALT)
 
 class CaptureCancelled(Exception):
     """Raised out of the capture/enroll poll loops when a caller-supplied should_cancel()
@@ -253,13 +264,13 @@ class SensorMatcher:
     def identify(self, template_uids : list = None, timeout : int = 15000):
         #Identify the currently-captured finger. template_uids=None/[] => identify against
         #ALL on-chip templates (nTemplates=0), as Windows does. Returns a MatchResult on a
-        #match (with .matched_tuid) or None on no-match (status 0x0509 MATCHER_MATCH_FAILED).
+        #match (with .matched_tuid) or None on no-match (status 0x0509/0x050b MATCHER_*).
         if template_uids is None: template_uids = []
         for u in template_uids: assert len(u) == 16
         n = len(template_uids)
         req = struct.pack("<BIII", tudor.Command.MATCHER_IDENTIFY, 1, n * 16, 0) + b"".join(template_uids)
         status, resp = self._send(req, 0x400, timeout)
-        if status == MATCHER_NO_MATCH:
+        if status in MATCHER_NO_MATCH_STATUSES:
             return None
         if status not in tudor.SUCCESS_STATUS: raise tudor.CommandFailedException(status)
         if len(resp) < 0x1e + QM_MATCH_RESULT_SIZE:
