@@ -8,6 +8,10 @@ This is a fork of `Popax21/synaTudor` being used to bring the Synaptics
 companion [`docs/frame-capture-re.md`](docs/frame-capture-re.md) (detailed,
 independently-validated binary RE of the capture protocol). Keep both up to date.
 
+**Outstanding work is tracked in [`docs/00bc-roadmap.md`](docs/00bc-roadmap.md)** — each
+item is scoped as a standalone session (functional gaps, hardening, DB2 housekeeping,
+packaging). Pick one per session; update it + the running log as you go.
+
 ## Current status (2026-09-24)
 - **DONE:** Linux OWNS the sensor — pairing + TLS 1.2 + encrypted command channel
   all work on `06cb:00bc` (Augusta, fw 10.1). Windows fingerprint enrollment is
