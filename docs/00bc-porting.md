@@ -162,7 +162,7 @@ sensor cert verified against a hardcoded per-firmware ECC public key.
 - **Working branch:** `00bc-re` (off `00bc`). Do not build on the blind `00bc`
   branch until Phase 0b confirms the DLL family.
 - **VCS:** no push permission to `origin` (`dmophir/synaTudor`); commits are
-  local. Do not use the `gh` CLI (enterprise-only auth); use plain `git`.
+  local. Use plain `git` over HTTPS.
 
 ## Strategy (diagnose first, then branch)
 ### Phase 0 — Diagnostics (cheap, reversible)
