@@ -1,4 +1,18 @@
+# Python
 **/__pycache__
+*.py[cod]
+
+# Editor / OS cruft
+*~
+*.swp
+*.swo
+*.orig
+.DS_Store
+
+# Build artifacts (module build dir + compiled self-test are also covered by
+# libfprint-tod/.gitignore; listed here too for clarity)
+libfprint-tod/build/
+libfprint-tod/tools/moc_selftest
 
 # Local opencode agent def (hardcodes user-specific 'toast' enterprise model)
 .opencode/agent/re.md
